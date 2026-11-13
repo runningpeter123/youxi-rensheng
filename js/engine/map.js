@@ -11,20 +11,39 @@
   const LM_ICON = { clocktower: '🕰️', garagehouse: '🔧', ferris: '🎡', palms: '🌴', skyline: '🏙️', needle: '🗼', market: '🐟', tvtower: '📡', bund: '🏛️', tower101: '🏙️', nightmarket: '🏮', redtower: '🗼', torii: '⛩️', statue: '🗽', pagoda: '🛕', archbridge: '🌉', bigclock: '🕰️', stadium: '🏟️', warehouse: '🧱', palace: '🏰', bean: '🫘', dome: '🏛️', obelisk: '🗿' };
 
   function generate(city, celeb) {
-    const L = city.layout, W = L.W, H = L.H;
+    // 每座城市放大 3 倍：道路和岸线按同一比例拉开，街区变成可逛的城区。S=1 时与旧图一致。
+    const raw = city.layout, S = 3;
+    const L = Object.assign({}, raw, {
+      W: raw.W * S, H: raw.H * S,
+      h: raw.h.map(v => v * S), v: raw.v.map(v => v * S),
+      ry: raw.ry == null ? undefined : raw.ry * S
+    });
+    const W = L.W, H = L.H;
     const rand = Y.rng(city.seed * 7919 + 13);
     const tiles = new Uint8Array(W * H).fill(T.GRASS);
     const set = (x, y, t) => { if (x >= 0 && y >= 0 && x < W && y < H) tiles[y * W + x] = t; };
     const get = (x, y) => (x < 0 || y < 0 || x >= W || y >= H) ? T.WATER : tiles[y * W + x];
     const sepRow = new Set(), sepCol = new Set();
     const vRoads = L.v.slice();
-    // 水域
-    if (L.water === 'bottom') { for (let y = H - 6; y < H; y++) { sepRow.add(y); for (let x = 0; x < W; x++) set(x, y, y >= H - 5 ? T.WATER : T.SAND); } }
-    if (L.water === 'right') { for (let x = W - 6; x < W; x++) { sepCol.add(x); for (let y = 0; y < H; y++) set(x, y, x >= W - 5 ? T.WATER : T.SAND); } vRoads.push(W - 8); }
-    if (L.water === 'river') { for (let y = L.ry; y < L.ry + 3; y++) { sepRow.add(y); for (let x = 0; x < W; x++) set(x, y, T.WATER); } }
+    // 岸线道路在 H/W - 8*S，水面从其后两格开始（S=1 时就是原来的 H-6 / W-6）
+    let waterTop = H, waterLeft = W, riverRows = 3;
+    if (L.water === 'bottom') {
+      waterTop = H - 8 * S + 2;
+      for (let y = waterTop; y < H; y++) { sepRow.add(y); for (let x = 0; x < W; x++) set(x, y, y < waterTop + S ? T.SAND : T.WATER); }
+    }
+    if (L.water === 'right') {
+      waterLeft = W - 8 * S + 2;
+      for (let x = waterLeft; x < W; x++) { sepCol.add(x); for (let y = 0; y < H; y++) set(x, y, x < waterLeft + S ? T.SAND : T.WATER); }
+      vRoads.push(W - 8 * S);
+    }
+    if (L.water === 'river') {
+      const nextRoad = L.h.find(r => r > L.ry) || H;
+      riverRows = Math.max(3, Math.min(3 * S, nextRoad - L.ry - 2));
+      for (let y = L.ry; y < L.ry + riverRows; y++) { sepRow.add(y); for (let x = 0; x < W; x++) set(x, y, T.WATER); }
+    }
     // 道路
-    for (const r of L.h) for (const y of [r, r + 1]) { sepRow.add(y); for (let x = 0; x < W; x++) { if (L.water === 'right' && x >= W - 6) continue; set(x, y, T.ROAD); } }
-    for (const c of vRoads) for (const x of [c, c + 1]) { sepCol.add(x); for (let y = 0; y < H; y++) { if (L.water === 'bottom' && y >= H - 6) continue; set(x, y, get(x, y) === T.WATER ? T.BRIDGE : T.ROAD); } }
+    for (const r of L.h) for (const y of [r, r + 1]) { sepRow.add(y); for (let x = 0; x < W; x++) { if (L.water === 'right' && x >= waterLeft) continue; set(x, y, T.ROAD); } }
+    for (const c of vRoads) for (const x of [c, c + 1]) { sepCol.add(x); for (let y = 0; y < H; y++) { if (L.water === 'bottom' && y >= waterTop) continue; set(x, y, get(x, y) === T.WATER ? T.BRIDGE : T.ROAD); } }
     const isRoad = t => t === T.ROAD || t === T.BRIDGE;
     // 街区
     const runs = (n, sep) => { const a = []; let s = -1; for (let i = 0; i <= n; i++) { if (i < n && !sep.has(i)) { if (s < 0) s = i; } else if (s >= 0) { a.push([s, i - 1]); s = -1; } } return a; };
@@ -33,7 +52,7 @@
       if (y1 + 1 >= H) continue;
       let ok = true; for (let x = x0; x <= x1; x++) if (!isRoad(get(x, y1 + 1))) ok = false;
       if (!ok || y1 - y0 + 1 < 4 || x1 - x0 + 1 < 5) continue;
-      const coastal = (L.water === 'bottom' && y1 + 1 === H - 8) || (L.water === 'right' && x1 + 1 === W - 8) || (L.water === 'river' && y1 + 1 === L.ry - 2);
+      const coastal = (L.water === 'bottom' && y1 + 1 === H - 8 * S) || (L.water === 'right' && x1 + 1 === W - 8 * S) || (L.water === 'river' && y1 + 1 === L.ry - 2 * S);
       blocks.push({ x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1, cursor: x0 + 1, used: false, coastal });
     }
     // 打乱（每城不同）
@@ -66,9 +85,15 @@
       return true;
     }
     const space = b => b.x1 - b.cursor;
-    // 1) 码头：必须临水
-    const hb = blocks.filter(b => b.coastal).sort((a, b) => space(b) - space(a))[0];
-    if (!hb || !place('harbor', hb)) throw new Error(city.id + ': no coastal block for harbor');
+    // 1) 码头：临水街区优先，放大后若岸线对不齐就挑离水最近的一块
+    let harborCands = blocks.filter(b => b.coastal).sort((a, b) => space(b) - space(a));
+    if (!harborCands.length) {
+      const dist = b => L.water === 'right' ? (W - b.x1) : L.water === 'river' ? Math.abs(b.y1 - (L.ry - 2 * S)) : (H - b.y1);
+      harborCands = blocks.slice().sort((a, b) => dist(a) - dist(b) || space(b) - space(a));
+    }
+    let harborOk = false;
+    for (const b of harborCands) if (place('harbor', b, 4)) { harborOk = true; break; }
+    if (!harborOk) throw new Error(city.id + ': no coastal block for harbor');
     // 2) 地标：占用整块空街区
     for (const lm of L.landmarks.filter(l => !l.decor)) {
       const [mw, mh] = LM_MIN[lm.type] || [5, 5];
@@ -94,9 +119,9 @@
     // 装饰型地标（水中雕像）
     for (const lm of L.landmarks.filter(l => l.decor)) {
       let r;
-      if (L.water === 'bottom') r = { x0: 3, x1: 5, y0: H - 4, y1: H - 2 };
-      else if (L.water === 'right') r = { x0: W - 4, x1: W - 2, y0: 2, y1: 4 };
-      else r = { x0: 2, x1: 4, y0: L.ry, y1: L.ry + 2 };
+      if (L.water === 'bottom') r = { x0: 3, x1: 5, y0: Math.min(H - 3, waterTop + S), y1: Math.min(H - 1, waterTop + S + 2) };
+      else if (L.water === 'right') r = { x0: Math.min(W - 3, waterLeft + S), x1: Math.min(W - 1, waterLeft + S + 2), y0: 2, y1: 4 };
+      else r = { x0: 2, x1: 4, y0: L.ry, y1: Math.min(L.ry + riverRows - 1, L.ry + 2) };
       for (let yy = r.y0; yy <= r.y1; yy++) for (let xx = r.x0; xx <= r.x1; xx++) set(xx, yy, T.LANDMARK);
       landmarks.push(Object.assign({ type: lm.type, label: lm.label, icon: LM_ICON[lm.type], decor: true }, r));
     }
@@ -105,27 +130,27 @@
     let ship = null;
     const freeWater = (x, y) => get(x, y) === T.WATER;
     if (L.water === 'bottom') {
-      for (let y = H - 6; y <= H - 3; y++) for (const x of [harbor.door.x, harbor.door.x + 1]) set(x, y, T.DOCK);
-      let sx = harbor.door.x + 3; if (sx + 11 > W - 1) sx = harbor.door.x - 13;
-      ship = { x: sx, y: H - 4, w: 11, h: 3, vertical: false };
+      for (let y = waterTop; y <= Math.min(H - 1, waterTop + S + 2); y++) for (const x of [harbor.door.x, harbor.door.x + 1]) set(x, y, T.DOCK);
+      let sx = harbor.door.x + 3; if (sx + 11 > W - 1) sx = Math.max(0, harbor.door.x - 13);
+      ship = { x: sx, y: Math.min(H - 3, waterTop + S), w: 11, h: 3, vertical: false };
     } else if (L.water === 'right') {
       const dy = harbor.y + 1;
-      for (let x = W - 6; x <= W - 3; x++) for (const y of [dy, dy + 1]) set(x, y, T.DOCK);
+      for (let x = waterLeft; x <= Math.min(W - 1, waterLeft + S + 2); x++) for (const y of [dy, dy + 1]) set(x, y, T.DOCK);
       let sy = dy + 3; if (sy + 9 > H - 1) sy = dy - 11;
-      ship = { x: W - 4, y: Math.max(0, sy), w: 3, h: 9, vertical: true };
+      ship = { x: Math.min(W - 3, waterLeft + S), y: Math.max(0, sy), w: 3, h: 9, vertical: true };
     } else {
-      for (let y = L.ry; y <= L.ry + 1; y++) for (const x of [harbor.door.x, harbor.door.x + 1]) if (get(x, y) === T.WATER) set(x, y, T.DOCK);
-      const fits = sx => { for (let x = sx; x < sx + 9; x++) for (let y = L.ry; y < L.ry + 3; y++) if (!freeWater(x, y)) return false; return true; };
+      for (let y = L.ry; y < L.ry + riverRows; y++) for (const x of [harbor.door.x, harbor.door.x + 1]) if (get(x, y) === T.WATER) set(x, y, T.DOCK);
+      const fits = sx => { for (let x = sx; x < sx + 9; x++) for (let y = L.ry; y < L.ry + riverRows; y++) if (!freeWater(x, y)) return false; return true; };
       let sx = null;
       for (let d = 3; d < W && sx == null; d++) { if (fits(harbor.door.x + d)) sx = harbor.door.x + d; else if (fits(harbor.door.x - d - 8)) sx = harbor.door.x - d - 8; }
-      if (sx != null) ship = { x: sx, y: L.ry, w: 9, h: 3, vertical: false };
+      if (sx != null) ship = { x: sx, y: L.ry, w: 9, h: Math.min(3, riverRows), vertical: false };
     }
     if (ship) for (let y = ship.y; y < ship.y + ship.h; y++) for (let x = ship.x; x < ship.x + ship.w; x++) if (get(x, y) === T.WATER) set(x, y, T.SHIP);
     // 公园、树木、花
     const fountains = [];
     for (const b of blocks) {
       if (b.used || b.lm) continue;
-      if (rand() < (L.parks || 0.2)) {
+      if (rand() < Math.min(0.55, (L.parks || 0.2) + 0.12)) {
         for (let y = b.y0; y <= b.y1; y++) for (let x = b.x0; x <= b.x1; x++) set(x, y, T.PLAZA);
         fountains.push({ x: Math.floor((b.x0 + b.x1) / 2), y: Math.floor((b.y0 + b.y1) / 2) });
         b.park = true;
@@ -142,14 +167,49 @@
       const r = rand();
       if (!adj && r < 0.16) set(x, y, T.TREE); else if (r > 0.94) set(x, y, T.FLOWER);
     }
+    // 街区里的步道，避免放大后只剩一片草地
+    for (const b of blocks) {
+      if (b.lm) continue;
+      const midY = Math.floor((b.y0 + b.y1) / 2), midX = Math.floor((b.x0 + b.x1) / 2);
+      for (let x = b.x0; x <= b.x1; x++) if (get(x, midY) === T.GRASS) set(x, midY, T.PLAZA);
+      for (let y = b.y0; y <= b.y1; y++) if (get(midX, y) === T.GRASS) set(midX, y, T.PLAZA);
+    }
+    const districtGrid = new Uint8Array(W * H);
+    const districts = [];
+    blocks.forEach((b, i) => {
+      const inside = buildings.filter(bd => bd.x >= b.x0 && bd.x <= b.x1 && bd.y >= b.y0 && bd.y <= b.y1);
+      let name = '街巷';
+      if (inside.some(bd => bd.type === 'airport')) name = '空港区';
+      else if (inside.some(bd => bd.type === 'lab')) name = '科创区';
+      else if (inside.some(bd => bd.type === 'hq')) name = '商务区';
+      else if (inside.some(bd => bd.type === 'bank')) name = '金融区';
+      else if (inside.some(bd => bd.type === 'home')) name = '住宅区';
+      else if (inside.some(bd => bd.type === 'harbor')) name = '码头区';
+      else if (inside.some(bd => bd.type === 'cafe' || bd.type === 'club')) name = '市井区';
+      else if (b.coastal) name = '滨水区';
+      else if (b.park) name = '公园';
+      else if (b.lm) name = '地标区';
+      for (let y = b.y0; y <= b.y1; y++) for (let x = b.x0; x <= b.x1; x++) districtGrid[y * W + x] = i + 1;
+      districts.push({ name, x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 });
+    });
+    let storyTile = null, storyScore = 1e15;
+    const cx0 = Math.floor(W / 2), cy0 = Math.floor(H / 2);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const tt = get(x, y);
+      if (tt !== T.PLAZA && tt !== T.ROAD) continue;
+      const score = (x - cx0) * (x - cx0) + (y - cy0) * (y - cy0) + (tt === T.PLAZA ? 0 : 400);
+      if (score < storyScore) { storyScore = score; storyTile = { x, y }; }
+    }
+    if (!storyTile) storyTile = { x: 2, y: 2 };
     const hq = buildings.find(b => b.type === 'hq'), ap = buildings.find(b => b.type === 'airport');
     const lamps = [];
     for (const r of L.h) for (const c of vRoads) if (isRoad(get(c, r))) lamps.push({ x: (c + 1) * TS, y: (r + 1) * TS });
     const lanes = [];
-    for (const r of L.h) { const xmax = L.water === 'right' ? (W - 6) * TS : W * TS; lanes.push({ y: r * TS + 8, dir: -1, xmax }, { y: (r + 1) * TS + 8, dir: 1, xmax }); }
-    return { W, H, TS, tiles, buildings, landmarks, city, get, ship, fountains, lamps, lanes, runwayMid,
+    for (const r of L.h) { const xmax = L.water === 'right' ? waterLeft * TS : W * TS; lanes.push({ y: r * TS + 8, dir: -1, xmax }, { y: (r + 1) * TS + 8, dir: 1, xmax }); }
+    return { W, H, TS, tiles, buildings, landmarks, city, get, ship, fountains, lamps, lanes, runwayMid, districts, districtGrid,
       hRows: new Set(L.h.flatMap(r => [r, r + 1])), vCols: new Set(vRoads.flatMap(c => [c, c + 1])), hStarts: new Set(L.h), vStarts: new Set(vRoads),
       spawn: { x: hq.door.x * TS + 8, y: (hq.door.y + 1) * TS + 8 }, airportSpawn: { x: ap.door.x * TS + 8, y: (ap.door.y + 1) * TS + 8 },
+      storySpot: { x: storyTile.x * TS + 8, y: storyTile.y * TS + 8 },
       isSolid: (x, y) => SOLID.has(get(x, y)), isRoad, lights: [] };
   }
 
@@ -162,7 +222,9 @@
     const light = (x, y, w, h) => map.lights.push([x, y, w, h]);
     for (let ty = 0; ty < H; ty++) for (let tx = 0; tx < W; tx++) {
       const t = map.tiles[ty * W + tx], x = tx * TS, y = ty * TS;
-      const grass = () => { px(P.grass, x, y, TS, TS); for (let i = 0; i < 6; i++) px(P.grass2, x + Math.floor(rand() * 15), y + Math.floor(rand() * 14), 1, 2); };
+      const dId = map.districtGrid ? map.districtGrid[ty * W + tx] : 0;
+      const gBase = dId && (dId % 3 === 0) ? P.grass2 : P.grass;
+      const grass = () => { px(gBase, x, y, TS, TS); for (let i = 0; i < 6; i++) px(dId % 3 === 1 ? '#6aaa58' : P.grass2, x + Math.floor(rand() * 15), y + Math.floor(rand() * 14), 1, 2); };
       switch (t) {
         case T.GRASS: case T.BUILD: case T.LANDMARK: grass(); break;
         case T.FLOWER: (map.get(tx, ty) === T.FLOWER && isPlazaNear(map, tx, ty) ? px(P.plaza, x, y, TS, TS) : grass()); for (let i = 0; i < 4; i++) { const fx = x + 2 + Math.floor(rand() * 11), fy = y + 2 + Math.floor(rand() * 11); px(['#ff6b9a', '#ffd93b', '#fff', '#b388ff'][i % 4], fx, fy, 2, 2); px('#3c7a2f', fx, fy + 2, 1, 2); } break;

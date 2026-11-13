@@ -10,7 +10,7 @@
   <!-- 选人界面 -->
   <section id="start" class="show">
     <div class="logo"><span>游戏人生</span><small>PIXEL LIVES · 活一次名人的人生，然后改写它</small></div>
-    <p class="intro">选择一位名人，从他人生的真实节点开始。走上像素街头，搭讪、谈判、坐私人飞机、乘邮轮、投资建厂……在关键节点做出和他不一样的选择，看看历史会被你改写成什么样。</p>
+    <p class="intro">选择一位名人。屏幕上方会一直写着这一章要做什么，金色箭头带你过去。关键选择会再确认一次，不会被误触改写。逛街和投资是可选支线。</p>
     <button id="continue" class="big-btn">▶ 继续上次的人生</button>
     <div id="celebs"></div>
     <p class="foot">人物经历来自公开报道，数值为游戏化简化，仅供娱乐。</p>
@@ -19,19 +19,33 @@
   <!-- 游戏界面 -->
   <section id="game">
     <div id="hud"></div>
+    <div id="objective" hidden>
+      <div class="obj-row"><b id="obj-kicker"></b><span id="obj-title"></span><button id="obj-action" type="button" hidden>查看结局</button></div>
+      <div id="obj-main"></div>
+      <div id="obj-side"></div>
+      <div id="obj-keys"></div>
+    </div>
+    <div id="tutorial">
+      <div class="tut-box">
+        <div class="tag" id="tut-kicker"></div>
+        <h2 id="tut-title"></h2>
+        <p id="tut-body"></p>
+        <button id="tut-next" type="button">下一步</button>
+      </div>
+    </div>
     <div id="stage">
       <canvas id="world" width="960" height="640"></canvas>
       <div id="toasts"></div>
       <div id="modal"></div>
     </div>
     <div id="bar">
-      <button id="btn-skip" title="快进一个季度">⏩ 过一季度</button>
+      <button id="btn-skip" title="沿着箭头走向本章目标">🎯 走向目标</button>
       <button id="btn-tl" title="T">📜 时间线</button>
       <button id="btn-car" title="C" style="display:none">🚗 上车</button>
       <button id="btn-save">💾 存档</button>
       <button id="btn-mute" title="M">🔊 声音</button>
       <button id="btn-menu">☰ 菜单</button>
-      <span class="keys">WASD/方向键 移动 · E/空格 互动 · C 上下车 · T 时间线 · M 静音 · N 昼夜</span>
+      <span class="keys">WASD/点地面 移动 · E 互动 · 回车确认 · C 上下车 · T 时间线 · M 静音 · N 昼夜</span>
     </div>
     <div id="touch">
       <div class="dpad">
@@ -61,6 +75,7 @@
   <script src="js/engine/sprites.js"></script>
   <script src="js/engine/map.js"></script>
   <script src="js/engine/audio.js"></script>
+  <script src="js/story.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>

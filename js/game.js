@@ -16,6 +16,8 @@
 
   let canvas, ctx, state = null, celeb = null, world = null, mapCanvas = null, npcs = [];
   const keys = {}; let modal = null; let hudTimer = 0; let walkAnim = 0;
+  let clickPath = null, tutoring = false, inputLock = 0, cam = { x: 0, y: 0 };
+  let guide = null, lastDistrict = '';
   const $ = s => document.querySelector(s);
   const t = s => Y.t(s); // 名称替换：所有显示文字都经过 names.js
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -141,8 +143,6 @@
       if (state.month % 12 === 0) yearTick();
     }
     if (year() !== y0) Y.audio.sfx('chime'), toast(`🎂 ${year()} 年，${celeb.short} ${age()} 岁`);
-    checkNodes();
-    if (year() > celeb.endYear && !state.ended && !state.queue.some(q => q.kind === 'ending')) state.queue.push({ kind: 'ending' });
     save();
   }
   function allEvents() { return Y.events.concat(celeb.events || []); }
@@ -150,40 +150,18 @@
     const y = year();
     for (const c of api.holdings()) c.growth = Math.max(0.05, c.growth * 0.9);
     for (const c of api.ventures()) if (c.growth > 0.2) c.growth = Math.max(0.12, c.growth * 0.97);
-    const fixed = allEvents().filter(e => e.year === y && !state.events[e.id]);
-    fixed.forEach(e => state.queue.push({ kind: 'event', id: e.id }));
-    if (!fixed.length && R() < 0.5) {
-      const pool = allEvents().filter(e => !e.year && (e.minYear == null || y >= e.minYear) && (e.maxYear == null || y <= e.maxYear)
-        && (!state.events[e.id] || y - state.events[e.id] >= 3) && (!e.when || e.when(state, api)));
-      if (pool.length) state.queue.push({ kind: 'event', id: pick(pool).id });
-    }
+    // 时代事件不再突然弹窗，改到咖啡馆的「时代新闻」里，由玩家自己打开。
   }
-  function checkNodes() {
-    if (state.queue.some(q => q.kind === 'node')) return;
-    for (const n of celeb.nodes) {
-      const rec = state.nodes[n.id];
-      if (rec) continue;
-      if (n.year > year()) break;
-      if (!n.when || n.when(state, api)) { state.queue.push({ kind: 'node', id: n.id }); return; }
-      if (year() > n.year) state.nodes[n.id] = { status: 'skipped' };
-    }
-  }
+  function checkNodes() { refreshGuide(false); }
   function processQueue() {
     const q = state.queue.shift(); if (!q) return;
-    if (q.kind === 'node') {
-      const n = celeb.nodes.find(x => x.id === q.id);
-      if (!n || state.nodes[n.id] || (n.when && !n.when(state, api))) { checkNodes(); return; }
-      showNode(n);
-    } else if (q.kind === 'event') {
-      const e = allEvents().find(x => x.id === q.id); if (!e) return;
-      state.events[e.id] = year();
-      showEvent(e);
-    } else if (q.kind === 'ending') { state.ended = true; save(); showEnding(); }
+    if (q.kind === 'ending') { state.ended = true; save(); showEnding(); }
   }
 
   // ---------------- 对话框 ----------------
   function dialog(o) {
     closeDialog(true);
+    inputLock = performance.now() + 320;
     const root = $('#modal'); root.innerHTML = '';
     const box = document.createElement('div'); box.className = 'box ' + (o.cls || '');
     if (o.tag) { const t = document.createElement('div'); t.className = 'tag'; t.textContent = Y.t(o.tag); box.appendChild(t); }
@@ -203,13 +181,45 @@
       b.disabled = !!ch.disabled; b.dataset.i = i;
       b.innerHTML = `<span class="num">${i + 1}</span><span class="lbl"></span>` + (ch.sub ? `<span class="sub"></span>` : '');
       b.querySelector('.lbl').textContent = t(ch.label); if (ch.sub) b.querySelector('.sub').textContent = t(ch.sub);
-      b.onclick = () => { if (b.disabled) return; Y.audio.sfx('select'); closeDialog(); if (ch.fn) ch.fn(); };
+      b.onclick = () => {
+        if (b.disabled) return;
+        if (ch.danger) { openConfirm(ch); return; }
+        Y.audio.sfx('select'); closeDialog(); if (ch.fn) ch.fn();
+      };
+      b.onmouseenter = () => focusChoice(i, false);
       list.appendChild(b);
     });
     box.appendChild(list);
     root.appendChild(box); root.classList.add('show');
-    modal = { o, choices };
+    modal = { o, choices, focus: -1 };
+    if (choices.length === 1 && !choices[0].danger && !choices[0].disabled) focusChoice(0, false);
     Object.keys(keys).forEach(k => keys[k] = false);
+  }
+  function focusChoice(i, wrap) {
+    if (!modal) return;
+    const btns = [...document.querySelectorAll('#modal .choice')];
+    const usable = btns.map((b, idx) => b.disabled ? -1 : idx).filter(idx => idx >= 0);
+    if (!usable.length) return;
+    let next = i;
+    if (btns[i] && btns[i].disabled) next = usable[0];
+    if (wrap) {
+      const pos = usable.indexOf(modal.focus);
+      next = usable[(pos + (i >= modal.focus ? 1 : usable.length - 1)) % usable.length];
+    }
+    modal.focus = next;
+    btns.forEach((b, idx) => b.classList.toggle('focus', idx === next));
+  }
+  function openConfirm(ch) {
+    const prev = modal && modal.o;
+    dialog({
+      cls: 'node', title: '再确认一次',
+      text: t(`你要选择：\n${ch.label}\n\n这会记下来，不能靠误触完成。`),
+      closable: false,
+      choices: [
+        { label: '确认', fn: ch.fn },
+        { label: '返回', fn: () => { if (prev) dialog(prev); } }
+      ]
+    });
   }
   function closeDialog(silent) { const root = $('#modal'); root.classList.remove('show'); root.innerHTML = ''; modal = null; if (!silent) updateHUD(); }
   function result(title, r, next) {
@@ -237,20 +247,59 @@
   function showNode(n) {
     Y.audio.sfx('fanfare');
     dialog({
-      cls: 'node', tag: nodeTag(n), title: n.title, text: n.text,
-      html: `<div class="hint"><b>史实：</b>${n.history}</div>` + basisHTML(n), closable: false,
+      cls: 'node', tag: nodeTag(n), title: '这一章怎么走？', text: '选一条路。点下去之后还会再问一次，确认了才写入时间线。',
+      html: `<div class="hint"><b>史实：</b>${t(n.history)}</div>` + basisHTML(n), closable: false,
       choices: n.choices.map(ch => ({
-        label: ch.text, hist: !!ch.history, sub: ch.history ? '📜 史实选择' : ('🔀 游戏备选（虚构）' + (ch.chance ? ' · 🎲 有风险' : '')),
+        label: ch.text, hist: !!ch.history, danger: true,
+        sub: ch.history ? '📜 史实选择' : ('🔀 游戏备选（虚构）' + (ch.chance ? ' · 🎲 有风险' : '')),
         disabled: ch.req && !ch.req(state, api),
-        fn: () => {
-          const r = resolveChoice(ch);
-          state.nodes[n.id] = { status: 'done', choice: ch.text, history: !!ch.history, year: year(), result: r.res };
-          logEv(`【${n.title}】${ch.text}${ch.history ? '' : '（游戏备选）'}`);
-          if (!ch.history) toast('🔀 你选了游戏备选，时间线已分叉');
-          save();
-          result(ch.history ? '历史在重演' : '平行时间线（虚构）', r, () => { checkNodes(); updateHUD(); });
-        }
+        fn: () => { const r = resolveChoice(ch); finishChapter(n, ch, r); }
       }))
+    });
+  }
+  function openChapter(n) {
+    if (!n) return;
+    const d = guide || Y.story.describe(celeb, state, api);
+    const where = (n.basis && n.basis.location) ? '资料地点：' + n.basis.location + '。' : '';
+    const beats = [];
+    if (d.contact && d.phase === 'meet') {
+      beats.push({ tag: '见面', title: d.contact.name, text: d.contact.text });
+      state.contactsDone[d.contact.id] = year();
+      npcs = npcs.filter(x => !(x.contact && x.contact.id === d.contact.id));
+    }
+    beats.push({ tag: '第 ' + d.index + ' / ' + d.total + ' 章', title: n.title, text: n.text });
+    beats.push({ tag: '当时的情况', title: n.title, text: n.history, html: basisHTML(n) + (where ? '<p class="small muted">' + where + '</p>' : '') });
+    const showBeat = (k) => {
+      if (k >= beats.length) { showNode(n); return; }
+      const b = beats[k];
+      dialog({
+        cls: 'node', tag: b.tag, title: b.title, text: b.text, html: b.html || '',
+        closable: false,
+        choices: [{ label: k === beats.length - 1 ? '做出选择' : '继续', fn: () => showBeat(k + 1) }]
+      });
+    };
+    Y.audio.sfx('blip');
+    showBeat(0);
+  }
+  function finishChapter(n, ch, r) {
+    state.nodes[n.id] = { status: 'done', choice: ch.text, history: !!ch.history, year: year(), result: r.res };
+    logEv(`【${n.title}】${ch.text}${ch.history ? '' : '（游戏备选）'}`);
+    if (!ch.history) toast('你选了和资料不同的路，时间线分叉了');
+    else toast('这一章和资料记录一致');
+    Y.audio.sfx(ch.history ? 'fanfare' : 'chime');
+    save();
+    if ($('#obj-kicker')) {
+      $('#obj-kicker').textContent = '本章结算';
+      $('#obj-title').textContent = t(n.title);
+      $('#obj-main').textContent = '对照已经写好。看完再进入下一章。';
+    }
+    const histChoice = (n.choices.find(c => c.history) || {}).text || '';
+    const cmp = ch.history ? '和资料里的选择相同。' : '和资料不同，后面依赖这一步的章节可能会跳过。';
+    dialog({
+      cls: 'node wide', tag: '本章结算', title: t(n.title),
+      html: t(`<p>${cmp}</p><p><b>你的选择：</b>${ch.text}</p><p><b>资料中的选择：</b>${histChoice}</p>`) + basisHTML(n),
+      changes: r.changes, closable: false,
+      choices: [{ label: '进入下一章', fn: () => { refreshGuide(true); updateHUD(); } }]
     });
   }
   function showEvent(e) {
@@ -258,7 +307,7 @@
     if (e.auto) autoChanges = applyEffects(e.auto);
     dialog({
       tag: `⚡ 事件 · ${year()} 年`, title: e.title, text: e.text, changes: autoChanges, closable: false,
-      choices: e.choices.map(ch => ({ label: ch.text, sub: ch.chance ? '🎲 有风险' : '', fn: () => { const r = resolveChoice(ch); logEv(`${e.title}：${ch.text}`); save(); result(e.title, r); } }))
+      choices: e.choices.map(ch => ({ label: ch.text, danger: true, sub: ch.chance ? '🎲 有风险' : '', fn: () => { const r = resolveChoice(ch); logEv(`${e.title}：${ch.text}`); save(); result(e.title, r); } }))
     });
   }
 
@@ -268,10 +317,10 @@
     return '<table class="tbl"><tr><th>名称</th><th>估值</th><th>持股</th><th>你的份额</th><th>年增速</th></tr>' + list.map(c =>
       `<tr><td>${c.type === 'holding' ? '📈 ' : '🏢 '}${c.name}</td><td>${Y.fmtMoney(c.value)}</td><td>${Math.round(c.stake * 1000) / 10}%</td><td>${Y.fmtMoney(c.value * c.stake)}</td><td>${Math.round(c.growth * 100)}%</td></tr>`).join('') + '</table>';
   }
-  function pickCompany(title, fn, list) {
+  function pickCompany(title, fn, list, danger) {
     list = list || api.ventures();
     if (!list.length) { info(title, '你还没有公司。去研发园区或咖啡馆启动一个项目吧。'); return; }
-    dialog({ title, choices: list.map(c => ({ label: c.name, sub: `估值 ${Y.fmtMoney(c.value)} · 持股 ${Math.round(c.stake * 100)}%`, fn: () => fn(c) })) });
+    dialog({ title, choices: list.map(c => ({ label: c.name, danger: !!danger, sub: `估值 ${Y.fmtMoney(c.value)} · 持股 ${Math.round(c.stake * 100)}%`, fn: () => fn(c) })) });
   }
   function act(title, opts, eff, text) {
     if (opts.energy && !needEnergy(opts.energy)) return;
@@ -279,7 +328,8 @@
     const e = typeof eff === 'function' ? eff() : eff;
     if (opts.energy) state.energy = clamp(state.energy - opts.energy, 0, 100);
     applyEffects(e);
-    if (opts.months) advance(opts.months);
+    // 主线进行时不靠支线把年份快进掉，时间只在进入下一章时跳到资料里的年份。
+    if (opts.months && !(guide && guide.node)) advance(opts.months);
     const changes = diffText(b);
     save();
     result(title, { res: typeof text === 'function' ? text() : text, changes });
@@ -293,7 +343,7 @@
         { label: '埋头工作一个季度', sub: '公司估值小涨 · 3 个月', fn: () => act('闭关三个月', { energy: 15, months: 3 }, () => { api.ventures().forEach(c => c.value *= 1.03); return {}; }, '你的公司又向前推进了一步。') },
         { label: '💾 保存进度', fn: () => { save(); toast('💾 已保存'); } },
         { label: '📜 人生时间线', fn: showTimeline },
-        { label: '🏁 结束这一生，查看结局', fn: () => dialog({ title: '确定要结束吗？', text: '将直接进入结局对比。', choices: [{ label: '确定', fn: () => { state.ended = true; save(); showEnding(); } }], closeLabel: '再活一会儿' }) }
+        { label: '🏁 结束这一生，查看结局', danger: true, fn: () => { state.ended = true; save(); showEnding(); } }
       ] }),
     hq: b => {
       if (celeb.mode === 'athlete') return MODE_BUILD.athleteHQ(b);
@@ -303,7 +353,7 @@
         choices: [
           { label: '召开管理层会议', sub: (state.driving ? '🚗 开车到场：效果更好 · ' : '') + '精力 -10 · 1 个月', fn: () => act('会议结束', { energy: 10, months: 1 }, () => { api.mulMain(state.driving ? 1.05 : 1.02); return { rel: state.driving ? 4 : 2 }; }, state.driving ? '你准时开车到场，会议高效，团队士气高涨。' : '会议有点拖沓，但总算推进了。') },
           { label: '融资：出让 20% 股份换现金', fn: () => pickCompany('选择要融资的公司', c => { const v = c.value * c.stake * 0.2 * 0.9; act('融资完成', {}, () => { c.stake *= 0.8; c.value *= 1.05; return { cash: v }; }, `投资人看好「${c.name}」。`); }) },
-          { label: '出售一家公司', fn: () => pickCompany('选择要出售的公司', c => act('交易完成', {}, { sell: [{ id: c.id }] }, `你卖掉了「${c.name}」。`)) },
+          { label: '出售一家公司', fn: () => pickCompany('选择要出售的公司', c => act('交易完成', {}, { sell: [{ id: c.id }] }, `你卖掉了「${c.name}」。`), null, true) },
           { label: '启动新项目', fn: projectMenu },
           { label: '远程打电话谈合作', sub: '精力 -10', fn: negotiate }
         ] });
@@ -316,18 +366,23 @@
     bank: b => dialog({ tag: '🏦 ' + b.label, title: b.label, text: `当前现金 ${Y.fmtMoney(state.cash)}，身家 ${Y.fmtMoney(api.netWorth())}。`,
       choices: [
         { label: '投资机会', fn: investMenu },
-        { label: '卖出持仓', fn: () => pickCompany('卖出哪个持仓？', c => act('卖出', {}, { sell: [{ id: c.id }] }, `你卖出了 ${c.name}。`), api.holdings()) },
+        { label: '卖出持仓', fn: () => pickCompany('卖出哪个持仓？', c => act('卖出', {}, { sell: [{ id: c.id }] }, `你卖出了 ${c.name}。`), api.holdings(), true) },
         { label: '我的资产', fn: () => info('资产一览', `现金 ${Y.fmtMoney(state.cash)} · 身家 ${Y.fmtMoney(api.netWorth())}`, companyTable(api.activeCompanies())) },
         ...(celeb.mode === 'athlete' ? [{ label: '代言谈判', sub: '精力 -10 · 🎲 成功率看名气/魅力', fn: endorse }] : []),
         { label: '慈善捐赠 10% 现金', sub: '名气 +6 · 人际 +8', disabled: state.cash <= 0, fn: () => act('捐赠完成', {}, { cash: -state.cash * 0.1, fame: 6, rel: 8 }, '一所学校以你的名字命名了一间实验室。') }
       ] }),
-    airport: b => dialog({ tag: '✈️ ' + b.label, title: '机场', text: state.jet ? `你的私人飞机「${state.jet}」已在跑道待命。` : '商务航班要排队、转机，还会占用一个月。',
-      choices: [
-        { label: state.jet ? '乘私人飞机出发' : '乘商务航班出发', sub: state.jet ? '0 个月 · 精力 -5 · $20万' : '1 个月 · 精力 -15 · $5000', fn: flightMenu },
-        { label: '购买私人飞机（{pr_gulfstream}）', sub: '$3000万', disabled: !!state.jet || state.cash < 3000, fn: () => act('提机！', {}, () => { state.jet = '{pr_gulfstream}'; return { cash: -3000, fame: 3 }; }, '从此“说走就走”。') }
-      ] }),
+    airport: b => {
+      const d = guide;
+      const storyDest = d && d.phase === 'travel' ? d.cityId : null;
+      dialog({ tag: '✈️ ' + b.label, title: '机场', text: storyDest ? `本章要去${Y.cities[storyDest].name}。下面第一个按钮就是这段航程，点下去还会再确认一次。` : (state.jet ? `你的私人飞机「${state.jet}」已在跑道待命。` : '商务航班要排队、转机。主线进行时，年份不会被航班快进。'),
+        choices: [
+          ...(storyDest ? [{ label: `飞往${Y.cities[storyDest].name}（本章）`, sub: d.loc ? '资料地点：' + d.loc : '本章目的地', danger: true, fn: () => storyTravel(storyDest) }] : []),
+          { label: state.jet ? '乘私人飞机去别的城市' : '乘商务航班去别的城市', sub: '支线出行，会再确认目的地', fn: flightMenu },
+          { label: '购买私人飞机（{pr_gulfstream}）', sub: '$3000万', danger: true, disabled: !!state.jet || state.cash < 3000, fn: () => act('提机！', {}, () => { state.jet = '{pr_gulfstream}'; return { cash: -3000, fame: 3 }; }, '从此说走就走。') }
+        ] });
+    },
     garage: b => dialog({ tag: '🚗 ' + b.label, title: b.label, text: state.car ? `你的座驾：${state.car}。按 C 键或屏幕上的 🚗 按钮随时上下车。` : '买辆车，开车去开会更快更体面（移动速度翻倍）。',
-      choices: CARS.map(c => ({ label: `买 ${c.name}`, sub: Y.fmtMoney(c.price) + (c.req && !c.req(state, api) ? ' · ' + c.reqText : ''), disabled: state.cash < c.price || (c.req && !c.req(state, api)) || state.car === c.name,
+      choices: CARS.map(c => ({ label: `买 ${c.name}`, danger: true, sub: Y.fmtMoney(c.price) + (c.req && !c.req(state, api) ? ' · ' + c.reqText : ''), disabled: state.cash < c.price || (c.req && !c.req(state, api)) || state.car === c.name,
         fn: () => act('提车！', {}, () => { state.car = c.name; state.carColor = c.color; state.driving = true; return { cash: -c.price, fame: c.price >= 50 ? 3 : 0 }; }, `你坐进了崭新的 ${c.name}。`) }))
         .concat(state.car ? [{ label: state.driving ? '下车步行' : '上车', fn: toggleCar }, { label: '开车兜风', sub: '精力 +8', fn: () => act('兜风', {}, { energy: 8, fame: (CARS.find(c => c.name === state.car) || {}).price >= 10 ? 1 : 0 }, '风从车窗灌进来。') }] : []) }),
     club: b => dialog({ tag: '🍸 ' + b.label, title: b.label, text: '水晶灯下，商界名流举杯交谈。',
@@ -340,6 +395,7 @@
       choices: [
         { label: '喝杯咖啡', sub: '精力 +12', fn: () => act('续命', {}, { energy: 12, cash: -0.01 }, '一杯美式下肚，精神百倍。') },
         { label: '听听八卦', fn: gossip },
+        { label: '时代新闻', sub: '泡沫、危机这些年份事件在这里看', fn: eraMenu },
         { label: '在餐巾纸上写商业计划', sub: '启动一个新项目', fn: projectMenu }
       ] }),
     lab: b => celeb.mode === 'athlete' ? MODE_BUILD.athleteLab(b) : celeb.mode === 'politician' ? MODE_BUILD.politicianLab(b) : dialog({ tag: '🔬 ' + b.label, title: b.label, text: '工程师们在白板前争论，示波器嗡嗡作响。',
@@ -447,20 +503,83 @@
     lines.push(pick(['“听说城东新开的俱乐部，投资人都在那儿。”', '“码头那艘邮轮能包下来开派对。”', '“机场那边，有钱人都坐私人飞机，说走就走。”']));
     info('咖啡馆八卦', lines.join('\n'));
   }
+  function eraMenu() {
+    const y = year();
+    const list = allEvents().filter(e => e.year && e.year <= y && !state.events[e.id]);
+    if (!list.length) { info('时代新闻', '这一年没有新的大事件。往后章节里遇到了，再来看。'); return; }
+    dialog({ title: '时代新闻', text: '这些是年份到了才会发生的事，不看也不挡住主线。', choices: list.map(e => ({
+      label: e.year + ' · ' + e.title, danger: true, fn: () => { state.events[e.id] = year(); showEvent(e); }
+    })) });
+  }
+  function storyTravel(id) {
+    Y.audio.sfx('whoosh');
+    loadCity(id, 'airport');
+    logEv('为本章飞往' + Y.cities[id].name);
+    save();
+    refreshGuide(false);
+    toast('抵达 ' + Y.cities[id].name + '。跟着箭头走。');
+  }
+  function jumpToChapter(node, announce) {
+    if (!node) { state.chapterId = null; return; }
+    const target = node.year * 12 + ((node.month || 1) - 1);
+    const jumped = state.month < target;
+    if (jumped) {
+      const years = (target - state.month) / 12;
+      api.activeCompanies().forEach(c => { c.value *= Math.pow(1 + (c.growth || 0), years); });
+      state.month = target;
+    }
+    const changed = state.chapterId !== node.id;
+    state.chapterId = node.id;
+    if (announce && (jumped || changed)) toast(node.year + ' 年 · ' + t(node.title));
+  }
+  function refreshGuide(announce) {
+    if (!state || !celeb) return;
+    const node = Y.story.current(celeb, state, api);
+    jumpToChapter(node, announce);
+    guide = Y.story.describe(celeb, state, api);
+    const el = $('#objective');
+    if (!el) return;
+    el.hidden = false;
+    $('#obj-kicker').textContent = guide.phase === 'done' ? '尾声' : ('第 ' + guide.index + ' / ' + guide.total + ' 章');
+    $('#obj-title').textContent = t(guide.title || '');
+    $('#obj-main').textContent = t(guide.text || '');
+    $('#obj-side').textContent = guide.side || '';
+    $('#obj-keys').textContent = 'WASD 或点地面移动 · 靠近后按 E 或点标记 · 重要选择会再确认一次';
+    const action = $('#obj-action');
+    if (guide.phase === 'done') { action.hidden = false; action.textContent = '查看结局'; }
+    else { action.hidden = true; }
+  }
+  function objectivePoint() {
+    if (!guide || !world) return null;
+    if (guide.phase === 'travel') {
+      const b = world.buildings.find(b => b.type === 'airport');
+      return b ? { x: b.door.x * TS + 8, y: (b.door.y + 1) * TS + 8 } : null;
+    }
+    if (guide.phase === 'meet' && guide.contact) {
+      const n = npcs.find(n => n.contact && n.contact.id === guide.contact.id);
+      if (n) return { x: n.x, y: n.y };
+    }
+    if (guide.phase === 'spot' || guide.phase === 'meet') return world.storySpot ? { x: world.storySpot.x, y: world.storySpot.y } : null;
+    if (guide.phase === 'done') {
+      const b = world.buildings.find(b => b.type === 'home');
+      return b ? { x: b.door.x * TS + 8, y: (b.door.y + 1) * TS + 8 } : null;
+    }
+    return null;
+  }
   function flightMenu() {
     const jet = !!state.jet;
     if (!jet && !needEnergy(15)) return;
     dialog({ title: jet ? '🛩️ 私人飞机 · 选择目的地' : '✈️ 商务航班 · 选择目的地', choices: Y.cityOrder.filter(id => id !== state.city).map(id => {
       const c = Y.cities[id];
       const hasContact = (celeb.contacts || []).some(k => k.city === id && year() >= k.from && year() <= k.to && !state.contactsDone[k.id]);
-      return { label: `${c.name}（${c.country}）${hasContact ? ' ★' : ''}`, sub: c.flavor + (hasContact ? ' · 有关键人物在等你' : ''), fn: () => fly(id) };
+      return { label: `${c.name}（${c.country}）${hasContact ? ' ★' : ''}`, danger: true, sub: c.flavor + (hasContact ? ' · 有关键人物在等你' : ''), fn: () => fly(id) };
     }) });
   }
   function fly(id) {
     Y.audio.sfx('whoosh');
     const jet = !!state.jet;
     if (jet) { state.cash -= 20; state.energy = clamp(state.energy - 5, 0, 100); }
-    else { state.cash -= 0.5; state.energy = clamp(state.energy - 15, 0, 100); advance(1); }
+    else { state.cash -= 0.5; state.energy = clamp(state.energy - 15, 0, 100); if (!(guide && guide.node)) advance(1); }
     loadCity(id, 'airport');
     logEv(`飞往${Y.cities[id].name}`);
     save();
@@ -588,6 +707,8 @@
     if (at === 'airport') { state.px = world.airportSpawn.x; state.py = world.airportSpawn.y; }
     else if (at !== 'keep' || blocked(state.px, state.py) || state.px > world.W * TS || state.py > world.H * TS) { state.px = world.spawn.x; state.py = world.spawn.y; }
     state.dir = 'down';
+    lastDistrict = '';
+    clickPath = null;
     // 环境：车流、云影
     const r = Y.rng(Y.cities[id].seed * 13 + 1);
     world.traffic = world.lanes.flatMap(l => r() < 0.7 ? [{ lane: l, x: r() * l.xmax, speed: 40 + r() * 50, color: pick(['#e74c3c', '#3498db', '#f1c40f', '#ecf0f1', '#2ecc71', '#34495e']) }] : []);
@@ -604,9 +725,17 @@
     let dx = 0, dy = 0;
     if (keys.ArrowLeft || keys.a) dx -= 1; if (keys.ArrowRight || keys.d) dx += 1;
     if (keys.ArrowUp || keys.w) dy -= 1; if (keys.ArrowDown || keys.s) dy += 1;
+    if (dx || dy) clickPath = null;
+    else if (clickPath && clickPath.length) {
+      const p = clickPath[0];
+      const ddx = p.x - state.px, ddy = p.y - state.py;
+      if (Math.hypot(ddx, ddy) < 8) clickPath.shift();
+      else { dx = ddx; dy = ddy; }
+    }
     if (dx || dy) {
       const l = Math.hypot(dx, dy); dx /= l; dy /= l;
-      const sp = (state.driving ? 160 : 72) * dt;
+      let sp = (state.driving ? 230 : 132) * dt;
+      if (clickPath && clickPath.length) sp = Math.min(sp, Math.hypot(clickPath[0].x - state.px, clickPath[0].y - state.py));
       const nx = state.px + dx * sp, ny = state.py + dy * sp;
       if (!blocked(nx, state.py)) state.px = nx;
       if (!blocked(state.px, ny)) state.py = ny;
@@ -630,11 +759,23 @@
     for (const c of world.traffic) { c.x += c.lane.dir * c.speed * dt; if (c.x > c.lane.xmax + 20) c.x = -20; if (c.x < -20) c.x = c.lane.xmax + 20; }
     for (const c of world.clouds) { c.x += c.s * dt; if (c.x > world.W * TS + 100) c.x = -150; }
     hudTimer -= dt; if (hudTimer <= 0) { hudTimer = 0.3; updateHUD(); }
+    if (world.districtGrid) {
+      const tx = Math.floor(state.px / TS), ty = Math.floor(state.py / TS);
+      const id = world.districtGrid[ty * world.W + tx] || 0;
+      const d = id ? world.districts[id - 1] : null;
+      const name = d ? d.name : '';
+      if (name && name !== lastDistrict) { lastDistrict = name; toast('进入' + name); }
+    }
   }
   function nearTarget() {
+    const pt = objectivePoint();
+    if (guide && pt && (guide.phase === 'spot' || guide.phase === 'meet') && Math.hypot(pt.x - state.px, pt.y - state.py) < 34) return { kind: 'story' };
     let best = null, bd = 26;
     for (const n of npcs) { const d = Math.hypot(n.x - state.px, n.y - state.py); if (d < bd) { bd = d; best = { kind: 'npc', obj: n }; } }
-    if (best) return best;
+    if (best) {
+      if (guide && guide.phase === 'meet' && guide.contact && best.obj.contact && best.obj.contact.id === guide.contact.id) return { kind: 'story' };
+      return best;
+    }
     for (const b of world.buildings) {
       const dx = b.door.x * TS + 8, dy = b.door.y * TS + 16;
       if (Math.hypot(dx - state.px, dy - state.py) < 22) return { kind: 'building', obj: b };
@@ -647,10 +788,53 @@
     return null;
   }
   function interact() {
-    if (modal || !state) return;
+    if (modal || !state || tutoring) return;
+    inputLock = performance.now() + 420;
     const tg = nearTarget(); if (!tg) return;
     Y.audio.sfx('blip');
+    if (tg.kind === 'story') { const n = guide && guide.node; if (n) openChapter(n); return; }
     if (tg.kind === 'npc') npcDialog(tg.obj); else if (tg.kind === 'landmark') visitLandmark(tg.obj); else enterBuilding(tg.obj);
+  }
+  function findPath(px, py, tx, ty) {
+    const walk = (x, y) => x >= 0 && y >= 0 && x < world.W && y < world.H && !world.isSolid(x, y);
+    let gx = Math.floor(tx / TS), gy = Math.floor(ty / TS);
+    if (!walk(gx, gy)) {
+      let found = null, best = 1e9;
+      for (let r = 1; r <= 6 && !found; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const x = gx + dx, y = gy + dy;
+        if (!walk(x, y)) continue;
+        const d = dx * dx + dy * dy;
+        if (d < best) { best = d; found = { x, y }; }
+      }
+      if (!found) return [];
+      gx = found.x; gy = found.y;
+    }
+    const sx = Math.floor(px / TS), sy = Math.floor(py / TS);
+    if (sx === gx && sy === gy) return [{ x: gx * TS + 8, y: gy * TS + 8 }];
+    const key = (x, y) => y * world.W + x;
+    const q = [[sx, sy]], prev = new Map();
+    const seen = new Uint8Array(world.W * world.H); seen[key(sx, sy)] = 1;
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (let i = 0; i < q.length; i++) {
+      const [x, y] = q[i];
+      if (x === gx && y === gy) break;
+      for (const [dx, dy] of dirs) {
+        const nx = x + dx, ny = y + dy, k = key(nx, ny);
+        if (nx < 0 || ny < 0 || nx >= world.W || ny >= world.H || seen[k] || !walk(nx, ny)) continue;
+        seen[k] = 1; prev.set(k, key(x, y)); q.push([nx, ny]);
+      }
+    }
+    if (!seen[key(gx, gy)]) return [];
+    const path = [];
+    let cur = key(gx, gy);
+    while (cur !== key(sx, sy)) {
+      const x = cur % world.W, y = Math.floor(cur / world.W);
+      path.push({ x: x * TS + 8, y: y * TS + 8 });
+      cur = prev.get(cur);
+      if (cur == null) break;
+    }
+    path.reverse();
+    return path;
   }
   function enterBuilding(b) { state.visited[b.type] = true; BUILD[b.type](b); }
   function visitLandmark(lm) {
@@ -660,6 +844,62 @@
   }
 
   // ---------------- 渲染 ----------------
+  function drawMinimap() {
+    if (!world) return;
+    const mw = 156, mh = 108, x0 = VW - mw - 8, y0 = 8;
+    ctx.fillStyle = 'rgba(8,8,16,0.82)'; ctx.fillRect(x0, y0, mw, mh);
+    ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2; ctx.strokeRect(x0 + 1, y0 + 1, mw - 2, mh - 2);
+    const sx = (mw - 10) / world.W, sy = (mh - 18) / world.H, step = world.W > 90 ? 2 : 1;
+    for (let ty = 0; ty < world.H; ty += step) for (let tx = 0; tx < world.W; tx += step) {
+      const tile = world.get(tx, ty);
+      let col = null;
+      if (tile === Y.map.T.WATER || tile === Y.map.T.DOCK || tile === Y.map.T.SHIP) col = '#3f86c9';
+      else if (tile === Y.map.T.ROAD || tile === Y.map.T.BRIDGE || tile === Y.map.T.RUNWAY) col = '#8a8a98';
+      else if (tile === Y.map.T.BUILD) col = '#e6d3a3';
+      else if (tile === Y.map.T.PLAZA) col = '#cbbd9a';
+      else if (tile === Y.map.T.TREE) col = '#2f7d32';
+      else continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x0 + 5 + tx * sx, y0 + 5 + ty * sy, Math.max(1, sx * step), Math.max(1, sy * step));
+    }
+    const pt = objectivePoint();
+    if (pt) {
+      const px = x0 + 5 + (pt.x / TS) * sx, py = y0 + 5 + (pt.y / TS) * sy;
+      ctx.fillStyle = '#ffd54f'; ctx.fillRect(px - 3, py - 3, 6, 6);
+      ctx.strokeStyle = '#fff'; ctx.strokeRect(px - 3, py - 3, 6, 6);
+    }
+    ctx.fillStyle = '#7CFFB2';
+    ctx.beginPath();
+    ctx.arc(x0 + 5 + (state.px / TS) * sx, y0 + 5 + (state.py / TS) * sy, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('小地图', x0 + 6, y0 + mh - 4);
+  }
+  function drawObjectiveMarker(S) {
+    const pt = objectivePoint();
+    if (!pt) return;
+    const [sx, sy] = S(pt.x, pt.y);
+    const on = sx > 16 && sx < VW - 16 && sy > 16 && sy < VH - 16;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (on) {
+      const bob = Math.sin(performance.now() / 180) * 7;
+      const pulse = 10 + (Math.sin(performance.now() / 220) + 1) * 6;
+      ctx.strokeStyle = 'rgba(255,213,79,0.9)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy, pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#ffd54f';
+      ctx.beginPath(); ctx.moveTo(sx, sy - 36 + bob); ctx.lineTo(sx - 9, sy - 50 + bob); ctx.lineTo(sx + 9, sy - 50 + bob); ctx.fill();
+      return;
+    }
+    const ang = Math.atan2(sy - VH / 2, sx - VW / 2);
+    const ex = VW / 2 + Math.cos(ang) * (VW / 2 - 48);
+    const ey = VH / 2 + Math.sin(ang) * (VH / 2 - 48);
+    ctx.save(); ctx.translate(ex, ey); ctx.rotate(ang + Math.PI / 2);
+    ctx.fillStyle = '#ffd54f';
+    ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(12, 12); ctx.lineTo(-12, 12); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#ffd54f'; ctx.font = 'bold 12px sans-serif';
+    ctx.fillText('目标', Math.max(28, Math.min(VW - 28, ex)), Math.max(20, Math.min(VH - 20, ey + 22)));
+  }
   function dayState() {
     if (!dayNight) return { night: 0, tint: null };
     const p = ((performance.now() / 1000 + clockOffset) % DAY_LEN) / DAY_LEN; // 0 清晨 → 0.5 黄昏 → 0.75 深夜
@@ -674,6 +914,7 @@
     const now = performance.now() / 1000;
     const mw = world.W * TS * SC, mh = world.H * TS * SC;
     const cx = clamp(state.px * SC - VW / 2, 0, Math.max(0, mw - VW)), cy = clamp(state.py * SC - VH / 2, 0, Math.max(0, mh - VH));
+    cam.x = cx; cam.y = cy;
     const S = (x, y) => [x * SC - cx, y * SC - cy];
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VW, VH);
@@ -725,8 +966,21 @@
       for (const c of world.traffic) { const [sx, sy] = S(c.x + c.lane.dir * 12, c.lane.y); if (sx < -60 || sx > VW + 60) continue; const g = ctx.createRadialGradient(sx, sy, 1, sx, sy, 26); g.addColorStop(0, `rgba(255,250,200,${0.5 * ds.night})`); g.addColorStop(1, 'rgba(255,250,200,0)'); ctx.fillStyle = g; ctx.fillRect(sx - 26, sy - 26, 52, 52); }
       ctx.globalCompositeOperation = 'source-over';
     }
+    // 城区名
+    if (world.districts) {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const d of world.districts) {
+        const [sx, sy] = S(d.x * TS, d.y * TS);
+        if (sx < -80 || sx > VW + 80 || sy < -40 || sy > VH + 40) continue;
+        ctx.font = 'bold 22px "PingFang SC","Noto Sans CJK SC",sans-serif';
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillText(d.name, sx + 1, sy + 1);
+        ctx.fillStyle = 'rgba(255,236,170,0.82)';
+        ctx.fillText(d.name, sx, sy);
+      }
+    }
     // 招牌（在昼夜之后，保证可读）
-    const FONT = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif';
+    const FONT = '"Noto Sans CJK SC","PingFang SC",sans-serif';
     for (const b of world.buildings) {
       const x = (b.x * TS + 4) * SC - cx, y = (b.y * TS + 12) * SC - cy, w = (b.w * TS - 8) * SC;
       if (x > VW || y > VH || x + w < 0 || y + 24 < 0) continue;
@@ -759,14 +1013,21 @@
     // 交互提示
     const tg = nearTarget();
     if (tg && !modal) {
-      const msg = t(tg.kind === 'npc' ? `按 E / 空格 · 和 ${tg.obj.name}（${TYPE_NAME[tg.obj.type]}）交谈` : tg.kind === 'landmark' ? `按 E / 空格 · 参观「${tg.obj.label}」` : `按 E / 空格 · 进入「${tg.obj.label}」`);
-      ctx.font = `bold 16px ${FONT}`; const w = ctx.measureText(msg).width + 24;
-      ctx.fillStyle = 'rgba(10,10,30,0.85)'; ctx.fillRect(VW / 2 - w / 2, VH - 52, w, 34); ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2; ctx.strokeRect(VW / 2 - w / 2, VH - 52, w, 34);
-      ctx.fillStyle = '#fff'; ctx.fillText(msg, VW / 2, VH - 35);
+      const raw = tg.kind === 'story' ? '按 E 或点这里 · 进入本章' : tg.kind === 'npc' ? `按 E · 和 ${tg.obj.name}（${TYPE_NAME[tg.obj.type]}）交谈` : tg.kind === 'landmark' ? `按 E · 参观「${tg.obj.label}」` : `按 E · 进入「${tg.obj.label}」`;
+      let msg = t(raw);
+      let fs = 16;
+      ctx.font = `bold ${fs}px ${FONT}`;
+      const maxW = VW - 24;
+      while (ctx.measureText(msg).width > maxW - 28 && fs > 11) { fs--; ctx.font = `bold ${fs}px ${FONT}`; }
+      const w = Math.min(maxW, ctx.measureText(msg).width + 24);
+      ctx.fillStyle = 'rgba(10,10,30,0.85)'; ctx.fillRect(VW / 2 - w / 2, VH - 78, w, 32); ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2; ctx.strokeRect(VW / 2 - w / 2, VH - 78, w, 32);
+      ctx.fillStyle = '#fff'; ctx.fillText(msg, VW / 2, VH - 62);
     }
+    drawObjectiveMarker(S);
+    drawMinimap();
     // 城市名 + 时间
     ctx.textAlign = 'left'; ctx.font = `bold 14px ${FONT}`;
-    const cn = `📍 ${city().name} · ${city().country}${dayNight ? (ds.night > 0.5 ? ' · 🌙' : ' · ☀️') : ''}`; const cw = ctx.measureText(cn).width + 16;
+    const cn = `📍 ${t(city().name)} · ${t(city().country)}${dayNight ? (ds.night > 0.5 ? ' · 🌙' : ' · ☀️') : ''}`; const cw = Math.min(VW - 180, ctx.measureText(cn).width + 16);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(8, VH - 34, cw, 24); ctx.fillStyle = '#fff'; ctx.fillText(cn, 16, VH - 22);
   }
 
@@ -784,6 +1045,7 @@
       <div class="st">🤝 人际 ${bar(state.rel)}<em>${Math.round(state.rel)}</em></div>`);
     $('#btn-car').textContent = state.driving ? '🚶 下车' : '🚗 上车';
     $('#btn-car').style.display = state.car ? '' : 'none';
+    refreshGuide(false);
   }
   function toast(msg) {
     const t = document.createElement('div'); t.className = 'toast'; t.textContent = Y.t(msg); $('#toasts').appendChild(t);
@@ -838,12 +1100,14 @@
       cash: st.cash, fame: st.fame, charm: st.charm, energy: st.energy, rel: st.rel,
       companies: (st.companies || []).map(c => Object.assign({ status: 'active', type: 'company', since: st.year }, c)),
       flags: Object.assign({}, st.flags || {}), nodes: {}, events: {}, queue: [], log: [], friends: [], aff: {}, talked: {}, contactsDone: {}, visited: {},
-      car: null, carColor: null, driving: false, jet: null, ended: false
+      car: null, carColor: null, driving: false, jet: null, ended: false, storyGuide: 1
     };
     for (const n of celeb.nodes) if (n.year < st.year || (st.preDone || []).includes(n.id)) state.nodes[n.id] = { status: 'pre' };
     logEv(`以「${st.label}」开始人生`);
+    refreshGuide(false);
     enterWorld('spawn');
-    checkNodes();
+    refreshGuide(true);
+    if (!localStorage.getItem('yxrs_tutorial_v1')) openTutorial();
   }
   function enterWorld(at) {
     $('#start').classList.remove('show');
@@ -851,17 +1115,33 @@
     loadCity(state.city, at);
     save();
   }
-  function save() { if (state) try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch (e) { } }
+  function save() { if (state) try { const copy = Object.assign({}, state); delete copy._guideNotice; localStorage.setItem(SAVE_KEY, JSON.stringify(copy)); } catch (e) { } }
+  function normalizeSave(s) {
+    s.nodes = s.nodes || {}; s.flags = s.flags || {}; s.companies = s.companies || []; s.log = s.log || [];
+    s.friends = s.friends || []; s.aff = s.aff || {}; s.talked = s.talked || {}; s.contactsDone = s.contactsDone || {};
+    s.visited = s.visited || {}; s.events = s.events || {}; s.landmarks = s.landmarks || {};
+    s.queue = Array.isArray(s.queue) ? s.queue.filter(q => q && q.kind === 'ending') : [];
+    if (!s.storyGuide) {
+      s.storyGuide = 1;
+      s._guideNotice = '存档已接上章节引导：年份和选择都还在，接下来按屏幕上方的目标走。';
+    }
+    return s;
+  }
   function load() {
     try {
       const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); if (!s || !Y.celebs[s.celebId]) return false;
-      state = s; celeb = Y.celebs[s.celebId]; enterWorld('keep');
+      state = normalizeSave(s); celeb = Y.celebs[s.celebId];
+      refreshGuide(false);
+      enterWorld('keep');
+      refreshGuide(false);
+      if (state._guideNotice) { toast(state._guideNotice); state._guideNotice = ''; }
       if (state.ended && !state.freeplay) showEnding();
       return true;
     } catch (e) { return false; }
   }
   function showStart() {
-    closeDialog(true); state = null;
+    closeDialog(true); state = null; guide = null; tutoring = false;
+    const tut = $('#tutorial'); if (tut) tut.classList.remove('show');
     $('#game').classList.remove('show'); $('#start').classList.add('show');
     const wrap = $('#celebs'); wrap.innerHTML = '';
     const saved = localStorage.getItem(SAVE_KEY);
@@ -885,13 +1165,55 @@
   }
 
   // ---------------- 输入 ----------------
+  const TUTORIAL = [
+    ['先看上面的目标', '每一章要做什么，都写在屏幕上方。照着做就不会迷路。逛街、投资、聊天是支线，可以之后再玩。'],
+    ['箭头和小地图', '金色箭头指向这一章的地点。右上角小地图里，绿点是你，黄点是目标。点地面就能走过去，WASD 也行。'],
+    ['不会误触', '靠近以后按 E，或直接点目标。对话要按「继续」或回车才会往下走。关键选择点下去之后，还要再确认一次才会写入时间线。']
+  ];
+  let tutStep = 0;
+  function renderTut() {
+    $('#tut-kicker').textContent = '新手引导 ' + (tutStep + 1) + ' / ' + TUTORIAL.length;
+    $('#tut-title').textContent = TUTORIAL[tutStep][0];
+    $('#tut-body').textContent = TUTORIAL[tutStep][1];
+    $('#tut-next').textContent = tutStep === TUTORIAL.length - 1 ? '开始这一章' : '下一步';
+  }
+  function openTutorial() {
+    tutoring = true; tutStep = 0;
+    $('#tutorial').classList.add('show');
+    renderTut();
+  }
+  function advanceTut() {
+    if (!tutoring) return;
+    if (tutStep < TUTORIAL.length - 1) { tutStep++; renderTut(); return; }
+    tutoring = false;
+    localStorage.setItem('yxrs_tutorial_v1', '1');
+    $('#tutorial').classList.remove('show');
+  }
   function bindInput() {
     window.addEventListener('keydown', e => {
+      if (e.repeat) return;
       const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (tutoring) { if (k === 'enter') advanceTut(); return; }
       if (modal) {
+        if (performance.now() < inputLock) return;
+        if (e.key === 'Escape' && modal.o.closable !== false) { closeDialog(); return; }
         const n = parseInt(e.key, 10);
-        if (n >= 1 && n <= 9) { const btns = document.querySelectorAll('#modal .choice'); if (btns[n - 1] && !btns[n - 1].disabled) btns[n - 1].click(); e.preventDefault(); }
-        else if (e.key === 'Escape' && modal.o.closable !== false) closeDialog();
+        if (n >= 1 && n <= 9) { focusChoice(n - 1, false); e.preventDefault(); return; }
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          const btns = [...document.querySelectorAll('#modal .choice')];
+          const usable = btns.map((b, i) => b.disabled ? -1 : i).filter(i => i >= 0);
+          if (!usable.length) return;
+          let pos = usable.indexOf(modal.focus);
+          if (pos < 0) pos = e.key === 'ArrowDown' ? -1 : 0;
+          const dir = e.key === 'ArrowDown' ? 1 : -1;
+          focusChoice(usable[(pos + dir + usable.length) % usable.length], false);
+          e.preventDefault(); return;
+        }
+        if (k === 'enter' && modal.focus >= 0) {
+          const btns = document.querySelectorAll('#modal .choice');
+          if (btns[modal.focus] && !btns[modal.focus].disabled) btns[modal.focus].click();
+          e.preventDefault();
+        }
         return;
       }
       if (!state) return;
@@ -913,12 +1235,43 @@
     });
     $('#btn-a').addEventListener('pointerdown', e => { e.preventDefault(); interact(); });
     $('#btn-car').onclick = toggleCar;
-    $('#btn-tl').onclick = () => state && showTimeline();
+    $('#btn-tl').onclick = () => state && !tutoring && showTimeline();
     $('#btn-save').onclick = () => { save(); toast('💾 已保存'); };
-    $('#btn-skip').onclick = () => { if (!state || modal) return; act('一个季度过去了', { months: 3 }, () => { api.ventures().forEach(c => c.value *= 1.01); return {}; }, '你按部就班地工作、生活。'); };
+    $('#btn-skip').onclick = () => {
+      if (!state || modal || tutoring) return;
+      const pt = objectivePoint();
+      if (pt) clickPath = findPath(state.px, state.py, pt.x, pt.y);
+      toast(guide && guide.text ? t(guide.text) : '跟着金色箭头走');
+    };
+    $('#obj-action').onclick = () => {
+      if (!state || !guide || guide.phase !== 'done' || modal) return;
+      dialog({ title: '查看结局？', text: '打开和历史的总对照。这一步可以返回。', closable: false, choices: [
+        { label: '打开总对照', fn: () => { state.ended = true; save(); showEnding(); } },
+        { label: '再逛一会儿', fn: () => {} }
+      ] });
+    };
+    $('#tut-next').onclick = advanceTut;
+    canvas.addEventListener('pointerdown', e => {
+      if (!state || !world || modal || tutoring) return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const wx = (sx + cam.x) / SC, wy = (sy + cam.y) / SC;
+      const pt = objectivePoint();
+      if (pt && Math.hypot(pt.x - state.px, pt.y - state.py) < 42 && Math.hypot(pt.x - wx, pt.y - wy) < 36) { interact(); return; }
+      const tg = nearTarget();
+      if (tg && tg.kind !== 'story') {
+        const tx = tg.kind === 'npc' ? tg.obj.x : tg.obj.door.x * TS + 8;
+        const ty = tg.kind === 'npc' ? tg.obj.y : tg.obj.door.y * TS + 16;
+        if (Math.hypot(tx - wx, ty - wy) < 40) { interact(); return; }
+      }
+      clickPath = findPath(state.px, state.py, wx, wy);
+    });
     $('#btn-mute').onclick = toggleMute;
-    $('#btn-menu').onclick = () => { if (!state) return; dialog({ title: '菜单', choices: [
+    $('#btn-menu').onclick = () => { if (!state || tutoring) return; dialog({ title: '菜单', choices: [
       { label: '📜 人生时间线', fn: showTimeline },
+      { label: '🎯 再看本章目标', fn: () => { const pt = objectivePoint(); if (pt) clickPath = findPath(state.px, state.py, pt.x, pt.y); toast(guide ? t(guide.text) : ''); } },
+      { label: '📘 再看新手引导', fn: openTutorial },
       { label: '💾 保存', fn: () => { save(); toast('💾 已保存'); } },
       { label: '❓ 玩法说明', fn: help },
       { label: (Y.audio.muted ? '🔊 打开声音' : '🔇 静音') + '（M）', fn: toggleMute },
@@ -931,15 +1284,15 @@
   function updateMuteBtn() { const b = $('#btn-mute'); if (b) b.textContent = Y.audio.muted ? '🔇 静音中' : '🔊 声音'; }
   function toggleDayNight() { dayNight = !dayNight; localStorage.setItem('yxrs_daynight', dayNight ? '1' : '0'); toast(dayNight ? '🌙 昼夜效果：开' : '☀️ 昼夜效果：关'); }
   function help() {
-    info('玩法说明', '· WASD / 方向键移动，E / 空格 / 回车与建筑或路人互动，数字键选择选项。\n· 手机：左下方向键移动，A 键互动。\n· 每到历史关键年份，会弹出“人生关键节点”：选📜历史选择会重演历史，选🔀会改写他的人生轨迹。\n· 去机场乘飞机到其他城市谈合作、找关键人物（★）。去码头邀请朋友坐邮轮。车行买车，开车去公司开会效果更好。\n· 在研发园区启动新项目，在投资大厅投资。\n· M 静音，N 开关昼夜效果；城市地标前按 E 可以打卡。\n· ⏩ 按钮让时间快进一个季度。到 ' + (celeb ? celeb.endYear : 2026) + ' 年底进入结局，对比“历史上的他”和“你的他”。');
+    info('玩法说明', '· 屏幕上方是本章目标。金色箭头和小地图会带你过去。\n· WASD / 方向键移动，或点地面自动走。靠近后按 E，或直接点目标。\n· 对话用「继续」或回车往下走。数字键只是选中，不会直接生效。卖公司、买车、飞去别的城市、章节选择，都要再确认一次。\n· 选📜会沿资料走，选🔀是虚构分支。📚 可以展开这一章的依据。\n· 投资、聊天、买车、坐船是支线。咖啡馆里有「时代新闻」。\n· M 静音，N 昼夜，T 时间线。章节走完后可以看和历史的总对照。');
   }
 
   function loop(t) {
     const dt = Math.min(0.05, (t - (loop.last || t)) / 1000); loop.last = t;
     if (state && world) {
-      if (!modal) update(dt);
+      if (!modal && !tutoring) update(dt);
       draw();
-      if (!modal && state.queue.length) processQueue();
+      if (!modal && !tutoring && state.queue.length) processQueue();
     }
     requestAnimationFrame(loop);
   }
@@ -958,8 +1311,14 @@
   window.__YX = {
     get state() { return state; }, get celeb() { return celeb; }, get npcs() { return npcs; }, get world() { return world; }, get modal() { return modal; }, api,
     newGame, advance, interact, processQueue, enterBuilding: type => enterBuilding(world.buildings.find(b => b.type === type)), fly: id => fly(id),
-    teleport: (x, y) => { state.px = x; state.py = y; }, goCity: id => loadCity(id, 'spawn'), setClock: phase => { clockOffset = phase * DAY_LEN - (performance.now() / 1000) % DAY_LEN; }, dayState, toggleMute, toggleDayNight, get audio() { return Y.audio; }, visitLandmark, toggleCar, showTimeline, showEnding, save, load,
+    teleport: (x, y) => { state.px = x; state.py = y; clickPath = null; }, goCity: id => loadCity(id, 'spawn'), setClock: phase => { clockOffset = phase * DAY_LEN - (performance.now() / 1000) % DAY_LEN; }, dayState, toggleMute, toggleDayNight, get audio() { return Y.audio; }, visitLandmark, toggleCar, showTimeline, showEnding, save, load,
     pick: i => { const btns = document.querySelectorAll('#modal .choice'); if (btns[i]) btns[i].click(); return btns.length; },
-    choiceLabels: () => Array.from(document.querySelectorAll('#modal .choice .lbl')).map(x => x.textContent)
+    choiceLabels: () => Array.from(document.querySelectorAll('#modal .choice .lbl')).map(x => x.textContent),
+    get guide() { return guide; },
+    objective: () => guide && { phase: guide.phase, text: Y.t(guide.text), title: Y.t(guide.title), index: guide.index, total: guide.total, cityId: guide.cityId },
+    objectivePoint, seekObjective: () => { const p = objectivePoint(); if (!p) return 0; clickPath = findPath(state.px, state.py, p.x, p.y); return clickPath.length; },
+    step: dt => { if (state && world && !modal && !tutoring) update(dt); if (state && world) draw(); },
+    storyTravel, openChapter: () => { if (guide && guide.node) openChapter(guide.node); },
+    isTutorial: () => tutoring, advanceTut, dismissTutorial: () => { while (tutoring) advanceTut(); }
   };
 })(window.YXRS);
