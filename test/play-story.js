@@ -109,6 +109,8 @@ async function main() {
     await ev(`window.__YX.dismissTutorial()`);
     log('gpuboss', await ev(`JSON.stringify(window.__YX.objective())`));
     await playChapters(cdp, ev, shot, 2, false);
+    await playDivergent(ev, shot, 'rocketman');
+    await playDivergent(ev, shot, 'gpuboss');
 
     await ev(`localStorage.setItem('yxrs_tutorial_v1','1'); location.reload()`);
     await sleep(400);
@@ -151,13 +153,33 @@ async function main() {
   }
 }
 
-async function playChapters(cdp, ev, shot, count, capture) {
+const shotsTaken = {};
+async function playChapters(cdp, ev, shot, count, capture, preferAlt) {
   let shotChoice = !capture, shotSummary = !capture;
+  let alt = !!preferAlt;
+  let travelRetries = 0;
   for (let chapter = 0; chapter < count; chapter++) {
     const start = await ev(`window.__YX.objective()`);
     log('start chapter', JSON.stringify(start));
+    if (start && start.phase === 'travel') {
+      for (let i = 0; i < 80; i++) {
+        if (await pumpScene(ev, shot)) continue;
+        const m = await modalInfo(ev);
+        if (m && ((m.labels || []).some(l => l.includes('飞往')) || (m.title || '').includes('再确认'))) {
+          const idx = (m.labels || []).findIndex(l => l.includes('飞往') || l === '确认');
+          await ev(`window.__YX.pick(${idx < 0 ? 0 : idx})`);
+          continue;
+        }
+        const phase = await ev(`window.__YX.objective() && window.__YX.objective().phase`);
+        if (phase && phase !== 'travel') break;
+        const near = await ev(`(() => { const p = window.__YX.objectivePoint(); const s = window.__YX.state; return !!(p && s && Math.hypot(p.x - s.px, p.y - s.py) < 36); })()`);
+        if (near) await ev(`window.__YX.interact()`);
+        else await ev(`window.__YX.seekObjective(); window.__YX.step(0.25)`);
+      }
+    }
     let opened = false;
     for (let i = 0; i < 700 && !opened; i++) {
+      if (await pumpScene(ev, shot)) continue;
       const modal = await modalInfo(ev);
       if (modal) { opened = true; break; }
       const near = await ev(`(() => { const p = window.__YX.objectivePoint(); const s = window.__YX.state; if (!p || !s) return false; return Math.hypot(p.x - s.px, p.y - s.py) < 36; })()`);
@@ -175,7 +197,9 @@ async function playChapters(cdp, ev, shot, count, capture) {
       await ev(`window.__YX.step(0.2)`);
     }
     if (!opened) throw new Error('could not open chapter ' + JSON.stringify(start));
-    for (let step = 0; step < 16; step++) {
+    let advanced = false;
+    for (let step = 0; step < 40; step++) {
+      if (await pumpScene(ev, shot)) continue;
       const m = await modalInfo(ev);
       if (!m) break;
       log('modal', m.title, '|', (m.labels || []).join(' / '), '|', (m.subs || []).join(' / '));
@@ -190,19 +214,62 @@ async function playChapters(cdp, ev, shot, count, capture) {
       if (!shotChoice && (m.title || '').includes('这一章怎么走')) {
         await shot('chapter_choice.png'); shotChoice = true;
       }
-      let idx = subs.findIndex(s => s.includes('史实'));
+      let idx = subs.findIndex(s => alt ? (s.includes('游戏备选') || s.includes('虚构推演')) : s.includes('史实'));
+      if (alt && idx >= 0) alt = false;
       if (idx < 0) idx = 0;
       await ev(`window.__YX.pick(${idx})`);
       await sleep(40);
     }
     const after = await ev(`window.__YX.objective()`);
     log('after', JSON.stringify(after));
-    if (start && after && start.title === after.title && start.index === after.index) {
-      throw new Error('chapter did not advance: ' + start.title);
+    if (!start || !after || start.title !== after.title || start.index !== after.index) advanced = true;
+    if (advanced) continue;
+    if (start.phase === 'travel' && after.phase !== 'travel') {
+      if (++travelRetries > 4) throw new Error('stuck after travel ' + start.title);
+      chapter -= 1;
+      continue;
     }
+    throw new Error('chapter did not advance: ' + start.title);
   }
 }
 
+async function playDivergent(ev, shot, id) {
+  await ev(`localStorage.setItem('yxrs_tutorial_v1','1'); location.reload()`);
+  await sleep(500);
+  await waitUntil(() => ev(`!!document.querySelector('.card[data-id="${id}"] .start-btn')`));
+  await ev(`document.querySelector('.card[data-id="${id}"] .start-btn').click()`);
+  await waitUntil(() => ev(`window.__YX && window.__YX.objective()`));
+  await ev(`window.__YX.dismissTutorial()`);
+  await playChapters(null, ev, shot, 1, false, true);
+  const info = await ev(`({ arc: window.__YX.state.arc, obj: window.__YX.objective() })`);
+  log('diverged', id, JSON.stringify(info));
+  if (!info.arc) throw new Error(id + ' did not enter a parallel arc');
+  if (!info.obj || String(info.obj.text).indexOf('虚构') < 0) throw new Error(id + ' follow-up is not fictional');
+  if (!shotsTaken.diverge) {
+    await ev(`window.__YX.step(0.05)`);
+    await shot('divergent_chapter.png');
+    shotsTaken.diverge = true;
+  }
+  await playChapters(null, ev, shot, 2, false, false);
+  if (!shotsTaken.review) {
+    await ev(`window.__YX.showEnding()`);
+    await sleep(250);
+    await shot('life_review.png');
+    shotsTaken.review = true;
+  }
+}
+async function pumpScene(ev, shot) {
+  const st = await ev(`window.__YX && window.__YX.sceneState && window.__YX.sceneState()`);
+  if (!st) return false;
+  if (shot && st.kind === 'consequence' && !shotsTaken.cons) { await shot('consequence_scene.png'); shotsTaken.cons = true; }
+  if (shot && st.kind === 'interact' && st.mode === 'pick' && !shotsTaken.talk) { await shot('dialogue_interaction.png'); shotsTaken.talk = true; }
+  if (shot && st.mood === 'high' && !shotsTaken.high) { await shot('emotional_high.png'); shotsTaken.high = true; }
+  if (shot && st.mood === 'low' && !shotsTaken.low) { await shot('emotional_low.png'); shotsTaken.low = true; }
+  if (st.mode === 'say') await ev(`window.__YX.advanceScene()`);
+  else await ev(`document.querySelector('#scene-actions button') && document.querySelector('#scene-actions button').click()`);
+  await sleep(40);
+  return true;
+}
 async function modalInfo(ev) {
   return ev(`(() => {
     const m = document.querySelector('#modal');

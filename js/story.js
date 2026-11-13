@@ -35,7 +35,15 @@
   }
 
   // 只跳过“下一章”里条件已经不可能满足的节点，不提前判后面的章节。
+  function arcChapters(celeb, state) {
+    const book = Y.branchbook && Y.branchbook[celeb.id];
+    const arc = book && state.arc && book.arcs[state.arc];
+    return arc ? arc.chapters : null;
+  }
+
   function current(celeb, state, api) {
+    const alt = arcChapters(celeb, state);
+    if (alt) return alt.find(c => !state.nodes[c.id]) || null;
     for (const n of celeb.nodes) {
       const rec = state.nodes[n.id];
       if (rec) continue;
@@ -60,24 +68,40 @@
 
   function describe(celeb, state, api) {
     const node = current(celeb, state, api);
-    const all = list(celeb, state);
+    const alt = arcChapters(celeb, state);
+    const all = alt || list(celeb, state);
     const total = all.length;
     const resolved = all.filter(n => {
       const r = state.nodes[n.id];
       return r && (r.status === 'done' || r.status === 'skipped');
     }).length;
+    const index = Math.min(total, resolved + (node ? 1 : 0));
     if (!node) {
       return {
         node: null, phase: 'done', index: total, total, title: '尾声', contact: null, cityId: state.city, loc: '',
-        text: '章节都走完了。回家可以结算这一生，菜单里也能打开和历史的总对照。',
-        side: '支线仍可逛：投资、社交、买车、坐船。'
+        text: state.arc ? '平行人生的章节走完了。可以打开人生回顾，看你离开资料之后的路。' : '章节都走完了。回家可以结算这一生，菜单里也能打开和历史的总对照。',
+        side: '支线仍可逛：投资、社交、买车、坐船。',
+        parallel: !!state.arc
       };
+    }
+    if (node.fictional) {
+      const cityId = node.city || celeb.homeCity;
+      const cityName = Y.cities[cityId] ? Y.cities[cityId].name : '';
+      const arc = Y.branchbook[celeb.id].arcs[state.arc];
+      const baseF = {
+        node, index, total, loc: '', cityId, cityName, contact: null,
+        title: node.title, parallel: true,
+        side: '这是 🔀 虚构推演。关系会记住你刚才的态度。'
+      };
+      if (state.city !== cityId) {
+        return Object.assign(baseF, { phase: 'travel', text: '前往机场，飞往' + cityName + '。🔀 虚构推演：「' + node.title + '」。' });
+      }
+      return Object.assign(baseF, { phase: 'spot', text: '前往金色标记。🔀 虚构推演：「' + node.title + '」。' + (arc ? '平行人生：' + arc.title + '。' : '') });
     }
     const loc = (node.basis && node.basis.location) || '';
     const cityId = stageFromLocation(loc) || celeb.homeCity;
     const contact = contactIn(celeb, node, cityId);
     const cityName = Y.cities[cityId] ? Y.cities[cityId].name : '';
-    const index = Math.min(total, resolved + 1);
     const where = loc ? '资料地点：' + loc + '。' : '';
     const base = {
       node, index, total, loc, cityId, cityName, contact, title: node.title,

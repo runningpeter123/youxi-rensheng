@@ -244,63 +244,223 @@
     const ageTxt = n.basis && n.basis.age ? n.basis.age : (n.year - celeb.birthYear);
     return `📜 人生关键节点 · ${n.year} 年${n.month ? n.month + ' 月' : ''} · ${celeb.short} ${ageTxt} 岁`;
   }
+  let scene = null, sceneCast = [], sceneLock = false, sceneTimer = null;
+  const WHO_LOOK = {
+    ally: { skin: '#f0c8a0', hair: '#3a2a1a', shirt: '#2b4f7a', pants: '#333', shoes: '#111' },
+    family: { skin: '#f1c9a5', hair: '#7a5a3a', shirt: '#2e7d32', pants: '#333', shoes: '#111' },
+    rival: { skin: '#e8c19b', hair: '#111', shirt: '#6a2a2a', pants: '#222', shoes: '#111' },
+    press: { skin: '#f2d0ae', hair: '#555', shirt: '#546e7a', pants: '#333', shoes: '#111' },
+    mentor: { skin: '#f0d6c0', hair: '#ddd', shirt: '#37474f', pants: '#333', shoes: '#111' }
+  };
+  function addBond(id, d) {
+    if (!d) return;
+    state.bonds = state.bonds || {};
+    state.bonds[id] = Math.max(-30, Math.min(40, (state.bonds[id] || 0) + d));
+  }
+  function memoryLine() {
+    const b = state.bonds || {};
+    if ((b.ally || 0) >= 8) return '他看你的眼神比上一章软。你把顾虑说过给他听。';
+    if ((b.ally || 0) <= -6) return '他站得远一点。上次你让他别问。';
+    if ((b.family || 0) >= 8) return '口袋里还有家人塞的纸条。';
+    if ((b.rival || 0) <= -6) return '对手还记得你寸步不让的那一次。';
+    return '';
+  }
+  function clearSceneTimer() { if (sceneTimer) { clearInterval(sceneTimer); sceneTimer = null; } }
+  function drawFace(who) {
+    const cv = $('#scene-face'); if (!cv) return;
+    const g = cv.getContext('2d');
+    g.clearRect(0, 0, 16, 16);
+    const look = who === 'inner' ? celeb.look : (WHO_LOOK[who] || WHO_LOOK.ally);
+    const frame = Y.sprites.char(look).down[0];
+    g.drawImage(frame, 0, 0);
+  }
+  function spawnSceneCast(ids) {
+    sceneCast = (ids || ['ally']).filter(id => WHO_LOOK[id]).map((id, i) => ({
+      id, look: WHO_LOOK[id],
+      x: state.px + 70 + i * 18, y: state.py + 10,
+      tx: state.px + 26 + i * 14, ty: state.py - 4
+    }));
+  }
+  function hideScene() {
+    clearSceneTimer();
+    const root = $('#scene');
+    if (root) { root.classList.remove('show'); root.dataset.kind = ''; root.dataset.mood = ''; }
+    sceneCast = [];
+    sceneLock = false;
+    if (state) state.sceneEnv = null;
+    scene = null;
+  }
+  function presentBeat(beat, meta, next) {
+    const root = $('#scene');
+    root.classList.add('show');
+    root.dataset.kind = meta.kind || 'consequence';
+    root.dataset.mood = meta.mood || '';
+    sceneLock = true;
+    state.sceneEnv = meta.env || 'office';
+    const say = beat.interact ? null : beat;
+    const spec = beat.interact || null;
+    $('#scene-name').textContent = t(spec ? spec.name : (say.name || ''));
+    $('#scene-expr').textContent = spec ? (spec.kind === 'crisis' ? '时间不多' : spec.kind === 'negotiate' ? '谈判' : spec.kind === 'press' ? '提问' : '对话') : (say.expr || '');
+    $('#scene-line').textContent = t(spec ? spec.prompt : (say.line || ''));
+    drawFace(spec ? spec.who : (say.who || 'inner'));
+    const box = $('#scene-actions');
+    box.innerHTML = '';
+    const timer = $('#scene-timer');
+    timer.textContent = '';
+    clearSceneTimer();
+    const go = (reply) => {
+      clearSceneTimer();
+      inputLock = performance.now() + 280;
+      if (reply) {
+        $('#scene-line').textContent = t(reply);
+        box.innerHTML = '';
+        const b = document.createElement('button');
+        b.textContent = '继续';
+        b.onclick = () => next();
+        box.appendChild(b);
+        scene.mode = 'say';
+        scene.next = next;
+        return;
+      }
+      next();
+    };
+    if (!spec) {
+      const b = document.createElement('button');
+      b.textContent = '继续';
+      b.onclick = () => go();
+      box.appendChild(b);
+      scene.mode = 'say';
+      scene.next = () => go();
+      return;
+    }
+    scene.mode = 'pick';
+    scene.next = null;
+    spec.options.forEach(op => {
+      const b = document.createElement('button');
+      b.textContent = op.text;
+      b.onclick = () => {
+        addBond(op.bond, op.d || 0);
+        if (op.fx) applyEffects(op.fx);
+        go(op.reply);
+      };
+      box.appendChild(b);
+    });
+    if (spec.seconds) {
+      let left = spec.seconds;
+      timer.textContent = left + ' 秒';
+      sceneTimer = setInterval(() => {
+        left -= 1;
+        timer.textContent = left > 0 ? (left + ' 秒') : '';
+        if (left <= 0) {
+          clearSceneTimer();
+          const to = spec.timeout;
+          if (to) { addBond(to.bond, to.d || 0); if (to.fx) applyEffects(to.fx); }
+          go(to ? to.text : '时间到了。');
+        }
+      }, 1000);
+    }
+  }
+  function playBeats(beats, meta, done) {
+    state.sceneBusy = true;
+    spawnSceneCast(meta.cast);
+    if (Y.audio.mood) Y.audio.mood(meta.mood);
+    else Y.audio.sfx(meta.mood === 'low' ? 'fail' : meta.mood === 'high' ? 'fanfare' : 'blip');
+    let i = 0;
+    const step = () => {
+      if (i >= beats.length) { hideScene(); state.sceneBusy = false; done(); return; }
+      const beat = beats[i++];
+      scene = { mode: 'say', meta: meta };
+      presentBeat(beat, meta, step);
+    };
+    scene = { mode: 'say', meta: meta };
+    step();
+  }
+  function advanceScene() {
+    if (!scene || scene.mode !== 'say' || !scene.next) return false;
+    const n = scene.next;
+    scene.next = null;
+    n();
+    return true;
+  }
   function showNode(n) {
-    Y.audio.sfx('fanfare');
+    const fictional = !!n.fictional;
     dialog({
-      cls: 'node', tag: nodeTag(n), title: '这一章怎么走？', text: '选一条路。点下去之后还会再问一次，确认了才写入时间线。',
-      html: `<div class="hint"><b>史实：</b>${t(n.history)}</div>` + basisHTML(n), closable: false,
+      cls: 'node',
+      tag: fictional ? '🔀 虚构推演' : nodeTag(n),
+      title: fictional ? n.title : '这一章怎么走？',
+      text: fictional ? '两条都会把平行人生写下去。点下去之后还要再确认一次。' : '选一条路。点下去之后还会再问一次，确认了才写入时间线。',
+      html: fictional ? '<p class="hint">🔀 虚构推演，不是资料记载。</p>' : (`<div class="hint"><b>史实：</b>${t(n.history)}</div>` + basisHTML(n)),
+      closable: false,
       choices: n.choices.map(ch => ({
         label: ch.text, hist: !!ch.history, danger: true,
-        sub: ch.history ? '📜 史实选择' : ('🔀 游戏备选（虚构）' + (ch.chance ? ' · 🎲 有风险' : '')),
+        sub: fictional ? '🔀 虚构推演' : (ch.history ? '📜 史实选择' : ('🔀 游戏备选（虚构）' + (ch.chance ? ' · 🎲 有风险' : ''))),
         disabled: ch.req && !ch.req(state, api),
         fn: () => { const r = resolveChoice(ch); finishChapter(n, ch, r); }
       }))
     });
   }
+  function leadBeats(n) {
+    const beats = [];
+    const mem = memoryLine();
+    if (mem) beats.push({ who: 'inner', name: '心里话', expr: '沉', line: mem });
+    let intro = n.fictional ? (n.intro || n.text || '') : (n.text || '');
+    if (n.fictional && state.diverge && n.offset === 1) intro = '你刚才没有按资料走。你选的是「' + state.diverge.choice + '」。' + intro;
+    beats.push({ who: 'inner', name: n.fictional ? '🔀 虚构推演' : '这一章', expr: '定', line: intro });
+    if (!n.fictional && n.history) beats.push({ who: 'inner', name: '资料', expr: '定', line: n.history });
+    const spec = n.kind ? Y.drama.interactOf(n.kind, n.prompt, n.who || '身边的人') : Y.drama.defaultInteract();
+    beats.push({ interact: spec });
+    return beats;
+  }
   function openChapter(n) {
     if (!n) return;
     const d = guide || Y.story.describe(celeb, state, api);
-    const where = (n.basis && n.basis.location) ? '资料地点：' + n.basis.location + '。' : '';
-    const beats = [];
-    if (d.contact && d.phase === 'meet') {
-      beats.push({ tag: '见面', title: d.contact.name, text: d.contact.text });
+    if (d && d.contact && d.phase === 'meet' && !n.fictional) {
       state.contactsDone[d.contact.id] = year();
       npcs = npcs.filter(x => !(x.contact && x.contact.id === d.contact.id));
     }
-    beats.push({ tag: '第 ' + d.index + ' / ' + d.total + ' 章', title: n.title, text: n.text });
-    beats.push({ tag: '当时的情况', title: n.title, text: n.history, html: basisHTML(n) + (where ? '<p class="small muted">' + where + '</p>' : '') });
-    const showBeat = (k) => {
-      if (k >= beats.length) { showNode(n); return; }
-      const b = beats[k];
-      dialog({
-        cls: 'node', tag: b.tag, title: b.title, text: b.text, html: b.html || '',
-        closable: false,
-        choices: [{ label: k === beats.length - 1 ? '做出选择' : '继续', fn: () => showBeat(k + 1) }]
-      });
-    };
-    Y.audio.sfx('blip');
-    showBeat(0);
+    inputLock = performance.now() + 420;
+    playBeats(leadBeats(n), { mood: 'tense', env: n.fictional ? (n.env || 'garage') : 'office', kind: 'interact', cast: ['ally'] }, () => showNode(n));
   }
   function finishChapter(n, ch, r) {
-    state.nodes[n.id] = { status: 'done', choice: ch.text, history: !!ch.history, year: year(), result: r.res };
-    logEv(`【${n.title}】${ch.text}${ch.history ? '' : '（游戏备选）'}`);
-    if (!ch.history) toast('你选了和资料不同的路，时间线分叉了');
-    else toast('这一章和资料记录一致');
-    Y.audio.sfx(ch.history ? 'fanfare' : 'chime');
+    state.nodes[n.id] = { status: 'done', choice: ch.text, history: !!ch.history, fictional: !!n.fictional, year: year(), result: r.res };
+    if (ch.tone) state.arcTone = ch.tone;
+    logEv((n.fictional ? '🔀 ' : '') + '【' + n.title + '】' + ch.text + (ch.history ? '' : (n.fictional ? '' : '（游戏备选）')));
+    if (!n.fictional && !ch.history && !state.arc) {
+      const arcId = Y.drama.pickArc(ch, n);
+      const arc = Y.drama.arcOf(celeb.id, arcId);
+      if (arc) {
+        state.arc = arcId;
+        state.diverge = { from: n.title, choice: ch.text, year: year() };
+        state.divergeYear = year();
+        celeb.nodes.forEach(h => { if (!state.nodes[h.id]) state.nodes[h.id] = { status: 'skipped', reason: 'arc' }; });
+        logEv('🔀 虚构推演开始：' + arc.title);
+        toast('时间线分叉了：' + arc.title);
+      }
+    } else if (ch.history) toast('这一章和资料记录一致');
     save();
+    const spec = n.fictional ? Y.drama.arcAfter(n, ch) : Y.drama.historicalAfter(n, ch, r);
+    state.sceneBusy = true;
     if ($('#obj-kicker')) {
-      $('#obj-kicker').textContent = '本章结算';
+      $('#obj-kicker').textContent = spec.mood === 'low' ? '低谷' : (spec.mood === 'high' ? '高光' : '余波');
       $('#obj-title').textContent = t(n.title);
-      $('#obj-main').textContent = '对照已经写好。看完再进入下一章。';
+      $('#obj-main').textContent = '场面还没结束。';
     }
-    const histChoice = (n.choices.find(c => c.history) || {}).text || '';
-    const cmp = ch.history ? '和资料里的选择相同。' : '和资料不同，后面依赖这一步的章节可能会跳过。';
-    dialog({
-      cls: 'node wide', tag: '本章结算', title: t(n.title),
-      html: t(`<p>${cmp}</p><p><b>你的选择：</b>${ch.text}</p><p><b>资料中的选择：</b>${histChoice}</p>`) + basisHTML(n),
-      changes: r.changes, closable: false,
-      choices: [{ label: '进入下一章', fn: () => { refreshGuide(true); updateHUD(); } }]
+    playBeats(spec.beats, spec, () => {
+      const histChoice = (n.choices.find(c => c.history) || {}).text || '';
+      const arc = state.arc && Y.drama.arcOf(celeb.id, state.arc);
+      const cmp = n.fictional ? '这是平行人生里的一步。' : (ch.history ? '和资料里的选择相同。' : '和资料不同。后面的资料章节先让路，改走「' + (arc ? arc.title : '虚构推演') + '」。');
+      dialog({
+        cls: 'node wide', tag: n.fictional ? '🔀 虚构推演' : '本章结算', title: t(n.title),
+        html: t(`<p>${cmp}</p><p><b>你的选择：</b>${ch.text}</p>` + (histChoice && !n.fictional ? `<p><b>资料中的选择：</b>${histChoice}</p>` : '')) + (n.fictional ? '' : basisHTML(n)),
+        changes: (r.changes || []).concat(bondChips()),
+        closable: false,
+        choices: [{ label: guide && guide.phase === 'done' ? '打开人生回顾' : '进入下一章', fn: () => { refreshGuide(true); updateHUD(); if (!Y.story.current(celeb, state, api)) { state.ended = true; save(); showEnding(); } } }]
+      });
     });
+  }
+  function bondChips() {
+    const name = { ally: '盟友', family: '家人', rival: '对手', mentor: '引路人' };
+    return Object.keys(state.bonds || {}).filter(k => state.bonds[k]).map(k => ({ t: (name[k] || k) + ' ' + (state.bonds[k] > 0 ? '+' : '') + state.bonds[k], good: state.bonds[k] > 0 }));
   }
   function showEvent(e) {
     let autoChanges = [];
@@ -519,9 +679,14 @@
     refreshGuide(false);
     toast('抵达 ' + Y.cities[id].name + '。跟着箭头走。');
   }
+  function chapterMoment(node) {
+    if (node.offset != null) return Math.max(year(), (state.divergeYear || year()) + node.offset);
+    return node.year;
+  }
   function jumpToChapter(node, announce) {
     if (!node) { state.chapterId = null; return; }
-    const target = node.year * 12 + ((node.month || 1) - 1);
+    const y = chapterMoment(node);
+    const target = y * 12 + ((node.month || 1) - 1);
     const jumped = state.month < target;
     if (jumped) {
       const years = (target - state.month) / 12;
@@ -530,17 +695,17 @@
     }
     const changed = state.chapterId !== node.id;
     state.chapterId = node.id;
-    if (announce && (jumped || changed)) toast(node.year + ' 年 · ' + t(node.title));
+    if (announce && (jumped || changed)) toast(y + ' 年 · ' + t(node.title));
   }
   function refreshGuide(announce) {
-    if (!state || !celeb) return;
+    if (!state || !celeb || state.sceneBusy) return;
     const node = Y.story.current(celeb, state, api);
     jumpToChapter(node, announce);
     guide = Y.story.describe(celeb, state, api);
     const el = $('#objective');
     if (!el) return;
     el.hidden = false;
-    $('#obj-kicker').textContent = guide.phase === 'done' ? '尾声' : ('第 ' + guide.index + ' / ' + guide.total + ' 章');
+    $('#obj-kicker').textContent = guide.phase === 'done' ? (guide.parallel ? '平行人生 · 尾声' : '尾声') : ((guide.parallel ? '平行人生 ' : '第 ') + guide.index + ' / ' + guide.total + (guide.parallel ? '' : ' 章'));
     $('#obj-title').textContent = t(guide.title || '');
     $('#obj-main').textContent = t(guide.text || '');
     $('#obj-side').textContent = guide.side || '';
@@ -723,10 +888,12 @@
   }
   function update(dt) {
     let dx = 0, dy = 0;
+    if (!sceneLock) {
     if (keys.ArrowLeft || keys.a) dx -= 1; if (keys.ArrowRight || keys.d) dx += 1;
     if (keys.ArrowUp || keys.w) dy -= 1; if (keys.ArrowDown || keys.s) dy += 1;
+    }
     if (dx || dy) clickPath = null;
-    else if (clickPath && clickPath.length) {
+    else if (!sceneLock && clickPath && clickPath.length) {
       const p = clickPath[0];
       const ddx = p.x - state.px, ddy = p.y - state.py;
       if (Math.hypot(ddx, ddy) < 8) clickPath.shift();
@@ -755,6 +922,10 @@
         if (!blocked(nx, ny)) { n.x = nx; n.y = ny; n.anim += dt * 6; } else { n.t = 0; }
         n.dir = n.vx > 0 ? 'right' : n.vx < 0 ? 'left' : n.vy > 0 ? 'down' : 'up';
       } else n.anim = 0;
+    }
+    for (const c of sceneCast) {
+      c.x += (c.tx - c.x) * Math.min(1, dt * 2.2);
+      c.y += (c.ty - c.y) * Math.min(1, dt * 2.2);
     }
     for (const c of world.traffic) { c.x += c.lane.dir * c.speed * dt; if (c.x > c.lane.xmax + 20) c.x = -20; if (c.x < -20) c.x = c.lane.xmax + 20; }
     for (const c of world.clouds) { c.x += c.s * dt; if (c.x > world.W * TS + 100) c.x = -150; }
@@ -844,6 +1015,33 @@
   }
 
   // ---------------- 渲染 ----------------
+  function drawSceneFx() {
+    if (!state || !state.sceneEnv) return;
+    const env = state.sceneEnv;
+    const tnow = performance.now() / 1000;
+    if (env === 'rain' || env === 'low') {
+      ctx.strokeStyle = 'rgba(180,210,255,0.35)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 40; i++) {
+        const x = (i * 97 + tnow * 180) % VW, y = (i * 53 + tnow * 320) % VH;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 4, y + 12); ctx.stroke();
+      }
+    }
+    if (env === 'fireworks' || env === 'crowd' || env === 'high') {
+      for (let i = 0; i < 18; i++) {
+        const x = (Math.sin(tnow + i) * 0.5 + 0.5) * VW;
+        const y = (Math.cos(tnow * 0.7 + i * 2) * 0.3 + 0.25) * VH;
+        ctx.fillStyle = ['#ffd54f', '#ff8a65', '#fff', '#9be7ff'][i % 4];
+        ctx.fillRect(x, y, 3, 3);
+      }
+    }
+    if (env === 'garage') { ctx.fillStyle = 'rgba(40,24,8,0.25)'; ctx.fillRect(0, 0, VW, VH); }
+    if (env === 'board') { ctx.fillStyle = 'rgba(8,16,40,0.2)'; ctx.fillRect(0, 0, VW, VH); }
+    if (env === 'reporters' || env === 'press') {
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      for (let i = 0; i < 5; i++) ctx.fillRect(20 + i * 36, VH - 120, 8, 14);
+    }
+  }
   function drawMinimap() {
     if (!world) return;
     const mw = 156, mh = 108, x0 = VW - mw - 8, y0 = 8;
@@ -1023,6 +1221,11 @@
       ctx.fillStyle = 'rgba(10,10,30,0.85)'; ctx.fillRect(VW / 2 - w / 2, VH - 78, w, 32); ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 2; ctx.strokeRect(VW / 2 - w / 2, VH - 78, w, 32);
       ctx.fillStyle = '#fff'; ctx.fillText(msg, VW / 2, VH - 62);
     }
+    for (const c of sceneCast) {
+      const sp = Y.sprites.char(c.look);
+      ctx.drawImage(sp.down[0], (c.x - 8) * SC - cx, (c.y - 14) * SC - cy, 32, 32);
+    }
+    drawSceneFx();
     drawObjectiveMarker(S);
     drawMinimap();
     // 城市名 + 时间
@@ -1073,18 +1276,24 @@
     dialog({ cls: 'wide', title: `📜 人生时间线 · 历史上的他 vs 你的他`, html: `<p>已改写历史 <b>${t.rewrites}</b> 次，重演历史 <b>${t.same}</b> 次。</p>${t.html}<h3>最近经历</h3><ul class="log">${log}</ul>`, closeLabel: '关闭' });
   }
   function showEnding() {
-    const t = timelineHTML(), nw = api.netWorth(), h = celeb.history;
-    const ratio = h.netWorth ? nw / h.netWorth : 0;
-    const title = t.rewrites === 0 ? '历史复刻者' : t.rewrites <= 3 ? '蝴蝶效应制造者' : ratio > 1 ? '超越传奇的平行宇宙之王' : '时间线颠覆者';
+    const tl = timelineHTML(), nw = api.netWorth(), h = celeb.history;
+    const arc = state.arc && Y.drama.arcOf(celeb.id, state.arc);
+    const title = arc ? arc.ending.title : (tl.rewrites === 0 ? '历史复刻者' : '把资料走完的人');
+    const mine = arc ? arc.ending.text : (tl.rewrites === 0 ? '你几乎一直沿资料往前。高低都是那条路上的。' : '你改过一些步，又回到资料能接上的地方。');
+    const bondName = { ally: '盟友', family: '家人', rival: '对手', mentor: '引路人' };
+    const bonds = Object.keys(state.bonds || {}).map(k => `${bondName[k] || k} ${state.bonds[k] > 0 ? '+' : ''}${state.bonds[k]}`).join(' · ') || '还没有留下态度';
+    const diverge = state.diverge ? `<p>你在 ${state.diverge.year} 年离开资料。那一步是「${state.diverge.choice}」，平行人生叫「${arc ? arc.title : ''}」。</p>` : '<p>你没有离开资料。下面是资料里的结局，和你一路做的选择。</p>';
     const html = `
       <div class="ending">
-        <div class="cmp"><div><h4>历史上的${celeb.short}</h4><p class="big">${h.netWorth ? Y.fmtMoney(h.netWorth) : '（资料未给出身家）'}</p><p>${h.text}</p></div>
-        <div><h4>你的${celeb.short}（${year()} 年，${age()} 岁）</h4><p class="big">${Y.fmtMoney(nw)}</p><p>名气 ${Math.round(state.fame)} · 魅力 ${Math.round(state.charm)} · 人际 ${Math.round(state.rel)} · 朋友 ${state.friends.length} 位</p>
-        <p>名下：${api.ventures().map(c => c.name).join('、') || '无'}</p></div></div>
-        <p class="title-badge">称号：🏅 ${title}（改写历史 ${t.rewrites} 次）</p>
-        ${t.html}
+        <p class="title-badge">🏅 ${title}</p>
+        ${diverge}
+        <div class="cmp"><div><h4>资料里的${celeb.short}</h4><p class="big">${h.netWorth ? Y.fmtMoney(h.netWorth) : '（资料未给出身家）'}</p><p>${h.text}</p></div>
+        <div><h4>你的${celeb.short}（${year()} 年，${age()} 岁）</h4><p class="big">${Y.fmtMoney(nw)}</p><p>${mine}</p>
+        <p>关系：${bonds}</p>
+        <p>名气 ${Math.round(state.fame)} · 魅力 ${Math.round(state.charm)} · 人际 ${Math.round(state.rel)}</p></div></div>
+        ${tl.html}
       </div>`;
-    dialog({ cls: 'wide', tag: '🏁 人生结算', title: `${celeb.name}的另一种人生`, html, closable: false, choices: [
+    dialog({ cls: 'wide', tag: arc ? '🔀 虚构推演 · 人生回顾' : '🏁 人生回顾', title: `${celeb.name}的另一种人生`, html, closable: false, choices: [
       { label: '重新开始', fn: () => { localStorage.removeItem(SAVE_KEY); showStart(); } },
       { label: '继续在这个世界闲逛', fn: () => { state.freeplay = true; save(); } }
     ] });
@@ -1100,7 +1309,7 @@
       cash: st.cash, fame: st.fame, charm: st.charm, energy: st.energy, rel: st.rel,
       companies: (st.companies || []).map(c => Object.assign({ status: 'active', type: 'company', since: st.year }, c)),
       flags: Object.assign({}, st.flags || {}), nodes: {}, events: {}, queue: [], log: [], friends: [], aff: {}, talked: {}, contactsDone: {}, visited: {},
-      car: null, carColor: null, driving: false, jet: null, ended: false, storyGuide: 1
+      car: null, carColor: null, driving: false, jet: null, ended: false, storyGuide: 1, bonds: {}, arc: null, diverge: null
     };
     for (const n of celeb.nodes) if (n.year < st.year || (st.preDone || []).includes(n.id)) state.nodes[n.id] = { status: 'pre' };
     logEv(`以「${st.label}」开始人生`);
@@ -1121,6 +1330,7 @@
     s.friends = s.friends || []; s.aff = s.aff || {}; s.talked = s.talked || {}; s.contactsDone = s.contactsDone || {};
     s.visited = s.visited || {}; s.events = s.events || {}; s.landmarks = s.landmarks || {};
     s.queue = Array.isArray(s.queue) ? s.queue.filter(q => q && q.kind === 'ending') : [];
+    s.bonds = s.bonds || {};
     if (!s.storyGuide) {
       s.storyGuide = 1;
       s._guideNotice = '存档已接上章节引导：年份和选择都还在，接下来按屏幕上方的目标走。';
@@ -1140,7 +1350,7 @@
     } catch (e) { return false; }
   }
   function showStart() {
-    closeDialog(true); state = null; guide = null; tutoring = false;
+    closeDialog(true); hideScene(); state = null; guide = null; tutoring = false;
     const tut = $('#tutorial'); if (tut) tut.classList.remove('show');
     $('#game').classList.remove('show'); $('#start').classList.add('show');
     const wrap = $('#celebs'); wrap.innerHTML = '';
@@ -1193,6 +1403,11 @@
     window.addEventListener('keydown', e => {
       if (e.repeat) return;
       const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (scene && $('#scene').classList.contains('show')) {
+        if (k === 'enter' && performance.now() > inputLock) advanceScene();
+        e.preventDefault();
+        return;
+      }
       if (tutoring) { if (k === 'enter') advanceTut(); return; }
       if (modal) {
         if (performance.now() < inputLock) return;
@@ -1319,6 +1534,7 @@
     objectivePoint, seekObjective: () => { const p = objectivePoint(); if (!p) return 0; clickPath = findPath(state.px, state.py, p.x, p.y); return clickPath.length; },
     step: dt => { if (state && world && !modal && !tutoring) update(dt); if (state && world) draw(); },
     storyTravel, openChapter: () => { if (guide && guide.node) openChapter(guide.node); },
-    isTutorial: () => tutoring, advanceTut, dismissTutorial: () => { while (tutoring) advanceTut(); }
+    isTutorial: () => tutoring, advanceTut, dismissTutorial: () => { while (tutoring) advanceTut(); },
+    advanceScene, sceneState: () => scene && { mode: scene.mode, kind: scene.meta && scene.meta.kind, mood: scene.meta && scene.meta.mood, line: ($('#scene-line') || {}).textContent || '' }
   };
 })(window.YXRS);

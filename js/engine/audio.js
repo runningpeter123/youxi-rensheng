@@ -91,4 +91,5 @@
     step: t => noise(t, 0.02, 0.03, 3000, A.sfxBus)
   };
   A.sfx = function (name) { if (!A.ctx || A.muted || !SFX[name]) return; SFX[name](A.ctx.currentTime + 0.01); };
+  A.mood = function (m) { A.sfx(m === 'high' ? 'fanfare' : m === 'low' ? 'fail' : m === 'warm' ? 'chime' : 'blip'); };
 })(window.YXRS);

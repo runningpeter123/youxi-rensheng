@@ -38,6 +38,17 @@ section.show { display: block; }
 #obj-main { margin-top: 4px; font-size: 15px; line-height: 1.45; color: #fff8dc; }
 #obj-side, #obj-keys { margin-top: 2px; font-size: 12px; color: #b7c4de; }
 #obj-action { margin-left: auto; background: #7CFFB2; color: #14121f; border: 0; font-weight: 800; padding: 6px 10px; }
+#scene { display: none; position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 6; gap: 12px; align-items: flex-end; background: rgba(12, 10, 22, .92); border: 3px solid #ffd54f; padding: 10px; }
+#scene.show { display: flex; }
+#scene[data-mood="low"] { border-color: #8aa4c8; }
+#scene[data-mood="high"] { border-color: #ff8a65; }
+#scene-face { width: 96px; height: 96px; image-rendering: pixelated; background: #241f3a; border: 3px solid #6b5fa8; flex: none; }
+#scene-expr { color: #ffd54f; font-size: 12px; }
+#scene-name { font-weight: 800; color: #9be7ff; }
+#scene-line { margin: 4px 0 8px; line-height: 1.5; }
+#scene-actions { display: flex; flex-direction: column; gap: 6px; }
+#scene-actions button { text-align: left; background: #2e2850; color: #fff; border: 2px solid #6b5fa8; padding: 6px 8px; }
+#scene-timer { color: #ff8a65; font-weight: 800; }
 #tutorial { display: none; position: fixed; inset: 0; z-index: 20; background: rgba(5, 4, 12, .72); align-items: center; justify-content: center; padding: 18px; }
 #tutorial.show { display: flex; }
 .tut-box { width: min(520px, 100%); background: #1d1931; border: 4px solid #9be7ff; box-shadow: 8px 8px 0 #000; padding: 18px 20px; }
